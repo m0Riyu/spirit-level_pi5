@@ -50,6 +50,7 @@ TELEMETRY_SEND_EVERY = 1
 # the previous value of 23.
 MM_PER_M_PER_DIV = 0.02
 LEVEL_TOLERANCE_MM_PER_M = 0.01
+MAX_MEASURABLE_SLOPE_MM_PER_M = 0.1
 
 # 影像串流開關：True 顯示即時預覽；False 僅執行推論、輸出數值及 CSV。
 ENABLE_IMAGE_STREAM = True

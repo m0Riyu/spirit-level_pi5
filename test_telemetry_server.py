@@ -52,6 +52,7 @@ class TelemetryPayloadTests(unittest.TestCase):
             self.timings,
             mm_per_m_per_div=0.02,
             level_tolerance_mm_per_m=0.01,
+            max_measurable_slope_mm_per_m=0.1,
         )
 
     def test_uses_json_pitch_for_physical_conversion(self):
@@ -88,6 +89,34 @@ class TelemetryPayloadTests(unittest.TestCase):
         self.measurement.offset_px = 9.6
         self.measurement.offset_div = 9.6 / 19.0
         self.assertEqual(self.build()["system_state"], "ADJUST")
+
+    def test_official_positive_boundary_is_in_range(self):
+        self.measurement.offset_px = 95.0
+        self.measurement.offset_div = 5.0
+        payload = self.build()
+        self.assertEqual(payload["system_state"], "ADJUST")
+        self.assertTrue(payload["measurement"]["within_official_range"])
+
+    def test_official_negative_boundary_is_in_range(self):
+        self.measurement.offset_px = -95.0
+        self.measurement.offset_div = -5.0
+        payload = self.build()
+        self.assertEqual(payload["system_state"], "ADJUST")
+        self.assertTrue(payload["measurement"]["within_official_range"])
+
+    def test_above_official_range_is_out_of_range(self):
+        self.measurement.offset_px = 95.1
+        self.measurement.offset_div = 95.1 / 19.0
+        payload = self.build()
+        self.assertEqual(payload["system_state"], "OUT_OF_RANGE")
+        self.assertFalse(payload["measurement"]["within_official_range"])
+
+    def test_below_official_range_is_out_of_range(self):
+        self.measurement.offset_px = -95.1
+        self.measurement.offset_div = -95.1 / 19.0
+        payload = self.build()
+        self.assertEqual(payload["system_state"], "OUT_OF_RANGE")
+        self.assertFalse(payload["measurement"]["within_official_range"])
 
     def test_missing_detection_is_searching(self):
         self.detection.detected = 0
@@ -178,6 +207,16 @@ class DashboardLayoutTests(unittest.TestCase):
         self.assertIn("estimatedServerNow - resultReadyAt", html)
         self.assertIn("estimatedServerNow - capturedAt", html)
         self.assertIn("setInterval(updatePerformanceMetrics, 500)", html)
+
+    def test_out_of_range_hides_measurement_values(self):
+        html = (Path(__file__).parent / "dashboard" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('OUT_OF_RANGE: "超出範圍"', html)
+        self.assertIn("function showOutOfRange()", html)
+        self.assertIn(
+            "measurement.valid && measurement.within_official_range", html
+        )
 
 
 if __name__ == "__main__":

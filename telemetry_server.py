@@ -19,6 +19,7 @@ def build_telemetry_payload(
     *,
     mm_per_m_per_div,
     level_tolerance_mm_per_m,
+    max_measurable_slope_mm_per_m,
 ):
     """Build the versioned JSON message sent to dashboard clients."""
     valid = bool(detection.detected and measurement.valid)
@@ -29,16 +30,21 @@ def build_telemetry_payload(
         pixels_per_1_mmm = pixels_per_div / float(mm_per_m_per_div)
         slope_mm_per_m = offset_px / pixels_per_1_mmm
         angle_degrees = math.degrees(math.atan(slope_mm_per_m / 1000.0))
-        system_state = (
-            "LEVEL"
-            if abs(slope_mm_per_m) <= float(level_tolerance_mm_per_m)
-            else "ADJUST"
+        within_official_range = abs(slope_mm_per_m) <= float(
+            max_measurable_slope_mm_per_m
         )
+        if not within_official_range:
+            system_state = "OUT_OF_RANGE"
+        elif abs(slope_mm_per_m) <= float(level_tolerance_mm_per_m):
+            system_state = "LEVEL"
+        else:
+            system_state = "ADJUST"
     else:
         pixels_per_div = None
         pixels_per_1_mmm = None
         slope_mm_per_m = None
         angle_degrees = None
+        within_official_range = False
         system_state = "SEARCHING" if not detection.detected else "ERROR"
 
     return {
@@ -52,6 +58,7 @@ def build_telemetry_payload(
         "confidence": float(detection.confidence) if detection.detected else None,
         "measurement": {
             "valid": valid,
+            "within_official_range": within_official_range,
             "error": measurement.error,
             "bubble_center_x_roi": (
                 float(measurement.center_x_roi) if valid else None

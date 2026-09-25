@@ -162,6 +162,9 @@ def run():
                     level_tolerance_mm_per_m=(
                         config.LEVEL_TOLERANCE_MM_PER_M
                     ),
+                    max_measurable_slope_mm_per_m=(
+                        config.MAX_MEASURABLE_SLOPE_MM_PER_M
+                    ),
                 )
                 payload["frame_started_at_epoch_ms"] = frame_started_at_epoch_ms
                 payload["capture_completed_at_epoch_ms"] = (
