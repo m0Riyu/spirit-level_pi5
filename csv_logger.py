@@ -29,6 +29,18 @@ CSV_FIELDS = [
     "center_y_full",
     "box_width",
     "box_height",
+    "measurement_valid",
+    "measurement_error",
+    "bubble_center_x_roi",
+    "scale_center_x_roi",
+    "pitch_px_per_div",
+    "bubble_offset_px",
+    "bubble_offset_div",
+    "bubble_absolute_offset_div",
+    "bubble_direction",
+    "calibration_status",
+    "calibration_created_utc",
+    "calibration_source",
     "capture_ms",
     "predict_ms",
     "yolo_preprocess_ms",
@@ -60,11 +72,12 @@ class CsvLogger:
         self.writer.writeheader()
         self.closed = False
 
-    def write(self, frame_id, detection, timings):
+    def write(self, frame_id, detection, measurement, timings):
         row = {
             "frame_id": frame_id,
             "datetime": datetime.now().isoformat(timespec="milliseconds"),
             **detection.as_dict(),
+            **measurement.as_dict(),
             **timings,
             "confidence_threshold": config.CONFIDENCE_THRESHOLD,
             "model_height": config.MODEL_IMAGE_SIZE[0],

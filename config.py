@@ -26,6 +26,16 @@ ROI_Y2 = ROI_Y1 + ROI_HEIGHT
 CONFIDENCE_THRESHOLD = 0.25
 LENS_POSITION = 12.0
 
+# Bubble position calibration. Coordinates in this JSON are relative to the
+# same 740 x 160 ROI used by the YOLO detector.
+ENABLE_BUBBLE_MEASUREMENT = True
+BUBBLE_CALIBRATION_PATH = (
+    PROJECT_DIRECTORY
+    / "binary_stream_tuner_project"
+    / "binary_captures"
+    / "binary_20260926_014128_460579_tick_measurement.json"
+)
+
 # 影像串流開關：True 顯示即時預覽；False 僅執行推論、輸出數值及 CSV。
 ENABLE_IMAGE_STREAM = True
 PRINT_EVERY = 10

@@ -3,13 +3,14 @@
 import time
 
 import config
+from bubble_measurement import BubbleCalibration, BubbleMeasurement
 from camera import capture_roi, close_camera, create_camera
 from csv_logger import CsvLogger
 from detector import YoloDetector
 from display import close_windows, create_annotated_frame, show_frame
 
 
-def print_metrics(frame_id, detection, timings):
+def print_metrics(frame_id, detection, measurement, timings):
     if frame_id % config.PRINT_EVERY != 0:
         return
 
@@ -20,11 +21,19 @@ def print_metrics(frame_id, detection, timings):
         f"fps={timings['fps']:.1f}"
     )
     if detection.detected:
+        measurement_text = (
+            f"offset={measurement.offset_px:+.2f}px | "
+            f"div={measurement.offset_div:+.3f} | "
+            f"direction={measurement.direction} | "
+            if measurement.valid
+            else f"measurement={measurement.error} | "
+        )
         print(
             f"frame={frame_id} | "
             f"conf={detection.confidence:.4f} | "
             f"count={detection.detection_count} | "
-            f"center_x={detection.center_x_full:.2f}px | "
+            f"center_x_roi={detection.center_x_roi:.2f}px | "
+            f"{measurement_text}"
             f"{common}"
         )
     else:
@@ -51,6 +60,21 @@ def run():
     detector = YoloDetector()
     logger = CsvLogger()
     camera = None
+    calibration = None
+
+    if config.ENABLE_BUBBLE_MEASUREMENT:
+        try:
+            calibration = BubbleCalibration.from_json(
+                config.BUBBLE_CALIBRATION_PATH,
+                expected_size=(config.ROI_WIDTH, config.ROI_HEIGHT),
+            )
+            print(
+                "氣泡量測校正已載入："
+                f"center={calibration.center_x_roi:.3f}px, "
+                f"pitch={calibration.pitch_px_per_div:.3f}px/div"
+            )
+        except (OSError, KeyError, TypeError, ValueError) as error:
+            print(f"警告：無法載入氣泡量測校正，僅執行YOLO：{error}")
 
     print(f"CSV預定儲存位置：{logger.path.resolve()}")
 
@@ -69,6 +93,18 @@ def run():
             capture_ms = (time.perf_counter() - capture_start) * 1000.0
 
             prediction = detector.predict(bubble_roi)
+            if calibration is None:
+                measurement = BubbleMeasurement.disabled(
+                    "calibration_unavailable"
+                    if config.ENABLE_BUBBLE_MEASUREMENT
+                    else "measurement_disabled"
+                )
+            else:
+                measurement = calibration.measure(
+                    prediction.detection.center_x_roi
+                    if prediction.detection.detected
+                    else None
+                )
 
             annotated_frame = None
             plot_ms = 0.0
@@ -88,11 +124,11 @@ def run():
                 "fps": fps,
             }
 
-            logger.write(frame_id, prediction.detection, timings)
-            print_metrics(frame_id, prediction.detection, timings)
+            logger.write(frame_id, prediction.detection, measurement, timings)
+            print_metrics(frame_id, prediction.detection, measurement, timings)
 
             if config.ENABLE_IMAGE_STREAM and show_frame(
-                annotated_frame, prediction.detection, fps
+                annotated_frame, prediction.detection, measurement, fps
             ):
                 break
 

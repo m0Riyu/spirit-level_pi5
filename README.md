@@ -1,5 +1,30 @@
 # 相機刻度量測系統
 
+## YOLO 氣泡位置量測
+
+執行：
+
+```bash
+cd /home/user/my_project/live_yolo1_app
+python3 main.py
+```
+
+程式使用刻度校正 JSON 中的：
+
+- `reference_midpoint_x = 373.0 px` 作為刻度零點。
+- `global_pitch.pitch_px = 19.0 px/div` 作為每格像素數。
+
+YOLO 偵測到氣泡後，位置計算為：
+
+```text
+bubble_offset_px  = bubble_center_x_roi - scale_center_x_roi
+bubble_offset_div = bubble_offset_px / pitch_px_per_div
+```
+
+結果為正表示氣泡在刻度中心右側，負值表示在左側。終端、預覽畫面及
+CSV 都會輸出偏移像素與偏移格數。校正檔不存在或 ROI 尺寸不相符時，
+程式會保留原本的相機與 YOLO 功能，並將量測標記為不可用。
+
 ## 先看這裡
 
 進行即時刻度量測時，主要執行：
