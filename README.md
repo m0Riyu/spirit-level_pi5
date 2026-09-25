@@ -6,7 +6,9 @@
 
 ```bash
 cd /home/user/my_project/live_yolo1_app
-python3 main.py
+python3 -m venv --system-site-packages .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python main.py
 ```
 
 程式使用刻度校正 JSON 中的：
@@ -24,6 +26,34 @@ bubble_offset_div = bubble_offset_px / pitch_px_per_div
 結果為正表示氣泡在刻度中心右側，負值表示在左側。終端、預覽畫面及
 CSV 都會輸出偏移像素與偏移格數。校正檔不存在或 ROI 尺寸不相符時，
 程式會保留原本的相機與 YOLO 功能，並將量測標記為不可用。
+
+## 手機 WebSocket 接收畫面
+
+啟動 `main.py` 後，終端會印出接收端網址，例如：
+
+```text
+http://192.168.50.46:8000
+```
+
+手機和 Raspberry Pi 連到同一個網路後，直接以瀏覽器開啟該網址。
+接收端包含 Jetson Nano 上一版的欄位：
+
+- 傳輸效率、數據延遲、推理時間及系統總延遲。
+- 系統狀態。
+- 坡度、像素位移及傾斜角度。
+
+WebSocket 位址為 `ws://<Pi IP>:8765`。傳輸採用 JSON schema version 1；
+網頁斷線後會自動重新連線，且網路傳送不會阻塞相機推論。
+
+坡度換算沿用 Jetson Nano 公式，但 `PIXELS_PER_DIV` 改由刻度校正 JSON
+自動載入：
+
+```text
+PIXELS_PER_DIV = global_pitch.pitch_px = 19.0
+PIXELS_PER_1_MMM = PIXELS_PER_DIV / 0.02 = 950
+slope_mm_per_m = bubble_offset_px / PIXELS_PER_1_MMM
+angle_degrees = atan(slope_mm_per_m / 1000)
+```
 
 ## 先看這裡
 

@@ -36,6 +36,21 @@ BUBBLE_CALIBRATION_PATH = (
     / "binary_20260926_014128_460579_tick_measurement.json"
 )
 
+# Web dashboard and WebSocket telemetry. Open http://<Pi IP>:8000 on a phone
+# connected to the same network. The WebSocket endpoint is ws://<Pi IP>:8765.
+ENABLE_WEBSOCKET = True
+WEBSOCKET_HOST = "0.0.0.0"
+WEBSOCKET_PORT = 8765
+DASHBOARD_HOST = "0.0.0.0"
+DASHBOARD_PORT = 8000
+TELEMETRY_SEND_EVERY = 1
+
+# Physical conversion retained from the Jetson Nano version. PIXELS_PER_DIV is
+# loaded from the tick calibration JSON (currently 19.0), rather than fixed at
+# the previous value of 23.
+MM_PER_M_PER_DIV = 0.02
+LEVEL_TOLERANCE_PX = 1.0
+
 # 影像串流開關：True 顯示即時預覽；False 僅執行推論、輸出數值及 CSV。
 ENABLE_IMAGE_STREAM = True
 PRINT_EVERY = 10

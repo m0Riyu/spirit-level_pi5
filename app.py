@@ -8,6 +8,7 @@ from camera import capture_roi, close_camera, create_camera
 from csv_logger import CsvLogger
 from detector import YoloDetector
 from display import close_windows, create_annotated_frame, show_frame
+from telemetry_server import TelemetryServer, build_telemetry_payload
 
 
 def print_metrics(frame_id, detection, measurement, timings):
@@ -61,6 +62,7 @@ def run():
     logger = CsvLogger()
     camera = None
     calibration = None
+    telemetry = None
 
     if config.ENABLE_BUBBLE_MEASUREMENT:
         try:
@@ -76,6 +78,23 @@ def run():
         except (OSError, KeyError, TypeError, ValueError) as error:
             print(f"警告：無法載入氣泡量測校正，僅執行YOLO：{error}")
 
+    if config.ENABLE_WEBSOCKET:
+        try:
+            telemetry = TelemetryServer(
+                websocket_host=config.WEBSOCKET_HOST,
+                websocket_port=config.WEBSOCKET_PORT,
+                dashboard_host=config.DASHBOARD_HOST,
+                dashboard_port=config.DASHBOARD_PORT,
+                dashboard_directory=config.APP_DIRECTORY / "dashboard",
+            )
+            telemetry.start()
+            print("WebSocket遙測已啟動：")
+            for url in telemetry.dashboard_urls():
+                print(f"  {url}")
+        except (OSError, RuntimeError) as error:
+            telemetry = None
+            print(f"警告：WebSocket遙測無法啟動，主程式繼續執行：{error}")
+
     print(f"CSV預定儲存位置：{logger.path.resolve()}")
 
     try:
@@ -86,6 +105,7 @@ def run():
         frame_id = 0
         while True:
             frame_id += 1
+            frame_started_at_epoch_ms = time.time() * 1000.0
             loop_start = time.perf_counter()
 
             capture_start = time.perf_counter()
@@ -127,6 +147,21 @@ def run():
             logger.write(frame_id, prediction.detection, measurement, timings)
             print_metrics(frame_id, prediction.detection, measurement, timings)
 
+            if (
+                telemetry is not None
+                and frame_id % config.TELEMETRY_SEND_EVERY == 0
+            ):
+                payload = build_telemetry_payload(
+                    frame_id,
+                    prediction.detection,
+                    measurement,
+                    timings,
+                    mm_per_m_per_div=config.MM_PER_M_PER_DIV,
+                    level_tolerance_px=config.LEVEL_TOLERANCE_PX,
+                )
+                payload["frame_started_at_epoch_ms"] = frame_started_at_epoch_ms
+                telemetry.publish(payload)
+
             if config.ENABLE_IMAGE_STREAM and show_frame(
                 annotated_frame, prediction.detection, measurement, fps
             ):
@@ -138,6 +173,8 @@ def run():
         logger.close()
         if camera is not None:
             close_camera(camera)
+        if telemetry is not None:
+            telemetry.stop()
         close_windows()
 
         if ask_to_save_csv():

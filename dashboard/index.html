@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#07110f">
+  <title>RSK 高精度 AI 水平監控</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07110f;
+      --panel: #101c19;
+      --panel-soft: #14231f;
+      --line: rgba(143, 255, 219, 0.16);
+      --mint: #64f1c4;
+      --cyan: #73dfff;
+      --yellow: #ffd75e;
+      --red: #ff665f;
+      --orange: #ff9a5f;
+      --text: #f4faf8;
+      --muted: #8fa6a0;
+      --shadow: 0 24px 64px rgba(0, 0, 0, 0.34);
+    }
+
+    * { box-sizing: border-box; }
+
+    html { min-height: 100%; background: var(--bg); }
+
+    body {
+      min-height: 100vh;
+      margin: 0;
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+        "Noto Sans TC", "PingFang TC", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 12% -10%, rgba(40, 255, 189, 0.16), transparent 34rem),
+        radial-gradient(circle at 100% 28%, rgba(67, 121, 255, 0.1), transparent 28rem),
+        var(--bg);
+    }
+
+    .shell {
+      width: min(100%, 780px);
+      margin: 0 auto;
+      padding: max(28px, env(safe-area-inset-top)) 18px
+        max(32px, env(safe-area-inset-bottom));
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      padding: 8px 4px 28px;
+    }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      color: var(--mint);
+      font-size: clamp(25px, 6vw, 42px);
+      line-height: 1.12;
+      letter-spacing: -0.035em;
+    }
+
+    .connection {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 4px;
+      padding: 8px 11px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.035);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .connection-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--red);
+      box-shadow: 0 0 12px currentColor;
+    }
+
+    .connection.online { color: var(--mint); }
+    .connection.online .connection-dot { background: var(--mint); }
+
+    .card {
+      margin-bottom: 14px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: linear-gradient(145deg, rgba(24, 43, 38, 0.95), rgba(12, 23, 20, 0.96));
+      box-shadow: var(--shadow);
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1px;
+      background: var(--line);
+    }
+
+    .metric {
+      min-height: 134px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      padding: 22px 12px;
+      text-align: center;
+      background: var(--panel);
+    }
+
+    .label {
+      color: var(--muted);
+      font-size: clamp(14px, 3.8vw, 18px);
+      font-weight: 650;
+      letter-spacing: 0.02em;
+    }
+
+    .metric-value {
+      margin-top: 12px;
+      font-size: clamp(27px, 7vw, 40px);
+      font-weight: 850;
+      line-height: 1;
+      letter-spacing: -0.035em;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .mint { color: var(--mint); }
+    .yellow { color: var(--yellow); }
+    .cyan { color: var(--cyan); }
+    .orange { color: var(--orange); }
+
+    .state-card {
+      padding: 28px 20px 30px;
+      text-align: center;
+      border-color: rgba(255, 215, 94, 0.2);
+    }
+
+    .state-value {
+      margin: 12px 0 0;
+      color: var(--yellow);
+      font-size: clamp(38px, 11vw, 68px);
+      font-weight: 950;
+      line-height: 1;
+      letter-spacing: -0.045em;
+    }
+
+    .state-value::before { content: "◆"; margin-right: 12px; font-size: 0.52em; vertical-align: 0.2em; }
+    .state-card.level { border-color: rgba(100, 241, 196, 0.48); }
+    .state-card.level .state-value { color: var(--mint); }
+    .state-card.adjust { border-color: rgba(255, 102, 95, 0.52); }
+    .state-card.adjust .state-value { color: var(--red); }
+    .state-card.searching .state-value { color: var(--yellow); }
+    .state-card.error .state-value { color: var(--red); }
+
+    .hero-reading {
+      padding: 30px 20px 32px;
+      text-align: center;
+    }
+
+    .hero-value {
+      margin-top: 12px;
+      font-size: clamp(44px, 12vw, 76px);
+      font-weight: 900;
+      line-height: 1;
+      letter-spacing: -0.05em;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .pair {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1px;
+      background: var(--line);
+    }
+
+    .pair-item {
+      min-height: 142px;
+      padding: 28px 12px;
+      text-align: center;
+      background: var(--panel);
+    }
+
+    .pair-value {
+      margin-top: 12px;
+      font-size: clamp(29px, 8vw, 48px);
+      font-weight: 850;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .level-visual {
+      padding: 25px 20px 22px;
+    }
+
+    .level-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: baseline;
+      margin-bottom: 20px;
+    }
+
+    .division {
+      color: var(--mint);
+      font-size: 18px;
+      font-weight: 850;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .track {
+      position: relative;
+      height: 54px;
+      border: 1px solid rgba(100, 241, 196, 0.18);
+      border-radius: 999px;
+      background:
+        repeating-linear-gradient(90deg, transparent 0 calc(10% - 1px), rgba(143, 255, 219, 0.14) calc(10% - 1px) 10%),
+        #081310;
+    }
+
+    .track::after {
+      content: "";
+      position: absolute;
+      left: 50%;
+      top: -8px;
+      bottom: -8px;
+      width: 2px;
+      background: var(--mint);
+      opacity: 0.9;
+    }
+
+    .bubble {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 38px;
+      height: 38px;
+      border: 2px solid rgba(255, 255, 255, 0.78);
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 30%, #efffff, var(--cyan) 28%, #187c91 70%);
+      box-shadow: 0 0 24px rgba(115, 223, 255, 0.5);
+      transform: translate(-50%, -50%);
+      transition: left 100ms linear, opacity 160ms ease;
+    }
+
+    .detail-row {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      padding-top: 18px;
+    }
+
+    .detail { text-align: center; }
+    .detail span { display: block; color: var(--muted); font-size: 11px; }
+    .detail strong { display: block; margin-top: 4px; font-size: 14px; font-variant-numeric: tabular-nums; }
+
+    footer {
+      padding: 16px 4px 0;
+      color: #637872;
+      font-size: 11px;
+      line-height: 1.7;
+      text-align: center;
+      overflow-wrap: anywhere;
+    }
+
+    @media (max-width: 390px) {
+      .shell { padding-left: 12px; padding-right: 12px; }
+      header { gap: 8px; }
+      .connection span:last-child { display: none; }
+      .metric { min-height: 118px; }
+      .card { border-radius: 20px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div>
+        <p class="eyebrow">Real-time telemetry</p>
+        <h1>RSK 高精度 AI 水平監控</h1>
+      </div>
+      <div id="connection" class="connection">
+        <span class="connection-dot"></span>
+        <span id="connectionText">連線中</span>
+      </div>
+    </header>
+
+    <section class="card metrics" aria-label="效能指標">
+      <div class="metric">
+        <div class="label">傳輸效率</div>
+        <div id="rate" class="metric-value mint">—</div>
+      </div>
+      <div class="metric">
+        <div class="label">數據延遲</div>
+        <div id="latency" class="metric-value yellow">—</div>
+      </div>
+      <div class="metric">
+        <div class="label">推理時間</div>
+        <div id="inference" class="metric-value cyan">—</div>
+      </div>
+      <div class="metric">
+        <div class="label">系統總延遲</div>
+        <div id="totalLatency" class="metric-value orange">—</div>
+      </div>
+    </section>
+
+    <section id="stateCard" class="card state-card searching">
+      <div class="label">系統狀態</div>
+      <div id="state" class="state-value">WAITING</div>
+    </section>
+
+    <section class="card hero-reading">
+      <div class="label">坡度 (Slope)</div>
+      <div id="slope" class="hero-value">—</div>
+    </section>
+
+    <section class="card pair">
+      <div class="pair-item">
+        <div class="label">像素位移</div>
+        <div id="pixels" class="pair-value">—</div>
+      </div>
+      <div class="pair-item">
+        <div class="label">傾斜角度</div>
+        <div id="angle" class="pair-value">—</div>
+      </div>
+    </section>
+
+    <section class="card level-visual">
+      <div class="level-head">
+        <div class="label">氣泡相對刻度中心</div>
+        <div id="divisions" class="division">— div</div>
+      </div>
+      <div class="track" aria-label="氣泡位置">
+        <div id="bubble" class="bubble"></div>
+      </div>
+      <div class="detail-row">
+        <div class="detail"><span>信心度</span><strong id="confidence">—</strong></div>
+        <div class="detail"><span>畫面率</span><strong id="fps">—</strong></div>
+        <div class="detail"><span>Frame</span><strong id="frameId">—</strong></div>
+      </div>
+    </section>
+
+    <footer>
+      <div id="lastUpdate">尚未收到資料</div>
+      <div id="endpoint"></div>
+    </footer>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const ui = {
+      connection: $("connection"), connectionText: $("connectionText"),
+      rate: $("rate"), latency: $("latency"), inference: $("inference"),
+      totalLatency: $("totalLatency"), stateCard: $("stateCard"), state: $("state"),
+      slope: $("slope"), pixels: $("pixels"), angle: $("angle"),
+      divisions: $("divisions"), bubble: $("bubble"), confidence: $("confidence"),
+      fps: $("fps"), frameId: $("frameId"), lastUpdate: $("lastUpdate"),
+      endpoint: $("endpoint")
+    };
+
+    const params = new URLSearchParams(location.search);
+    const websocketPort = params.get("wsPort") || "8765";
+    const websocketHost = params.get("wsHost") || location.hostname || "127.0.0.1";
+    const websocketProtocol = location.protocol === "https:" ? "wss" : "ws";
+    const websocketUrl = `${websocketProtocol}://${websocketHost}:${websocketPort}`;
+    ui.endpoint.textContent = websocketUrl;
+
+    let socket;
+    let reconnectDelay = 500;
+    let pingTimer;
+    let latestOneWayLatency = null;
+    let lastTelemetryAt = 0;
+    let messageTimes = [];
+
+    const number = (value, digits, unit, signed = false) => {
+      if (value === null || value === undefined || !Number.isFinite(Number(value))) return "—";
+      const numeric = Number(value);
+      const prefix = signed && numeric > 0 ? "+" : "";
+      return `${prefix}${numeric.toFixed(digits)} ${unit}`;
+    };
+
+    function setConnection(online, text) {
+      ui.connection.classList.toggle("online", online);
+      ui.connectionText.textContent = text;
+    }
+
+    function setState(state) {
+      const normalized = state || "WAITING";
+      ui.state.textContent = normalized;
+      ui.stateCard.className = "card state-card " + normalized.toLowerCase();
+    }
+
+    function clearMeasurements(state = "WAITING") {
+      setState(state);
+      ui.slope.textContent = "—";
+      ui.pixels.textContent = "—";
+      ui.angle.textContent = "—";
+      ui.divisions.textContent = "— div";
+      ui.confidence.textContent = "—";
+      ui.bubble.style.opacity = "0.25";
+    }
+
+    function updateRate() {
+      const cutoff = performance.now() - 1000;
+      messageTimes = messageTimes.filter((value) => value >= cutoff);
+      ui.rate.textContent = `${messageTimes.length} 筆/秒`;
+    }
+
+    function renderTelemetry(data) {
+      lastTelemetryAt = Date.now();
+      messageTimes.push(performance.now());
+      updateRate();
+
+      const performanceData = data.performance || {};
+      const measurement = data.measurement || {};
+      ui.inference.textContent = number(performanceData.inference_ms, 1, "ms");
+      ui.fps.textContent = number(performanceData.fps, 1, "fps");
+      ui.frameId.textContent = data.frame_id ?? "—";
+      ui.latency.textContent = number(latestOneWayLatency, 1, "ms");
+      const total = Number(performanceData.processing_ms) + Number(latestOneWayLatency || 0);
+      ui.totalLatency.textContent = number(total, 1, "ms");
+      setState(data.system_state);
+
+      if (measurement.valid) {
+        ui.slope.textContent = number(measurement.slope_mm_per_m, 3, "mm/m", true);
+        ui.pixels.textContent = number(measurement.offset_px, 2, "px", true);
+        ui.angle.textContent = number(measurement.angle_degrees, 4, "°", true);
+        ui.divisions.textContent = number(measurement.offset_div, 3, "div", true);
+        ui.confidence.textContent = number((data.confidence || 0) * 100, 1, "%");
+
+        const divisions = Math.max(-5, Math.min(5, Number(measurement.offset_div)));
+        ui.bubble.style.left = `${50 + divisions * 9}%`;
+        ui.bubble.style.opacity = "1";
+      } else {
+        clearMeasurements(data.system_state);
+      }
+
+      ui.lastUpdate.textContent = `最後更新 ${new Date().toLocaleTimeString("zh-TW")} · frame ${data.frame_id}`;
+    }
+
+    function connect() {
+      setConnection(false, "連線中");
+      socket = new WebSocket(websocketUrl);
+
+      socket.addEventListener("open", () => {
+        reconnectDelay = 500;
+        setConnection(true, "已連線");
+        clearInterval(pingTimer);
+        pingTimer = setInterval(() => {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({
+              type: "ping",
+              client_sent_epoch_ms: Date.now()
+            }));
+          }
+        }, 1000);
+      });
+
+      socket.addEventListener("message", (event) => {
+        let data;
+        try { data = JSON.parse(event.data); } catch { return; }
+        if (data.type === "pong" && Number.isFinite(Number(data.client_sent_epoch_ms))) {
+          const sample = Math.max(0, (Date.now() - Number(data.client_sent_epoch_ms)) / 2);
+          latestOneWayLatency = latestOneWayLatency === null
+            ? sample
+            : latestOneWayLatency * 0.7 + sample * 0.3;
+          return;
+        }
+        if (data.type === "telemetry") renderTelemetry(data);
+      });
+
+      socket.addEventListener("close", () => {
+        clearInterval(pingTimer);
+        setConnection(false, "已斷線");
+        clearMeasurements("NO SIGNAL");
+        setTimeout(connect, reconnectDelay);
+        reconnectDelay = Math.min(8000, reconnectDelay * 1.7);
+      });
+
+      socket.addEventListener("error", () => socket.close());
+    }
+
+    setInterval(() => {
+      updateRate();
+      if (lastTelemetryAt && Date.now() - lastTelemetryAt > 2500) {
+        clearMeasurements("NO SIGNAL");
+      }
+    }, 250);
+
+    connect();
+  </script>
+</body>
+</html>
