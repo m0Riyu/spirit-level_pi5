@@ -118,6 +118,12 @@ class TelemetryServerIntegrationTests(unittest.TestCase):
                     f"http://127.0.0.1:{dashboard_port}", timeout=2
                 ).read()
                 self.assertIn(b"dashboard-ok", page)
+                time_response = json.loads(
+                    urllib.request.urlopen(
+                        f"http://127.0.0.1:{dashboard_port}/time", timeout=2
+                    ).read()
+                )
+                self.assertGreater(time_response["server_time_epoch_ms"], 0)
                 received = asyncio.run(
                     self._receive_message(server, websocket_port)
                 )
@@ -166,9 +172,11 @@ class DashboardLayoutTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("const RATE_WINDOW_MS = 3000", html)
-        self.assertIn("const LATENCY_SAMPLE_COUNT = 15", html)
         self.assertIn("const FRAME_SAMPLE_COUNT = 30", html)
         self.assertIn("function median(samples)", html)
+        self.assertIn("async function calibrateTime()", html)
+        self.assertIn("estimatedServerNow - resultReadyAt", html)
+        self.assertIn("estimatedServerNow - capturedAt", html)
         self.assertIn("setInterval(updatePerformanceMetrics, 500)", html)
 
 

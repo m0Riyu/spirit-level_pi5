@@ -111,8 +111,10 @@ def run():
             capture_start = time.perf_counter()
             _, bubble_roi = capture_roi(camera)
             capture_ms = (time.perf_counter() - capture_start) * 1000.0
+            capture_completed_at_epoch_ms = time.time() * 1000.0
 
             prediction = detector.predict(bubble_roi)
+            prediction_completed_at_epoch_ms = time.time() * 1000.0
             if calibration is None:
                 measurement = BubbleMeasurement.disabled(
                     "calibration_unavailable"
@@ -162,6 +164,12 @@ def run():
                     ),
                 )
                 payload["frame_started_at_epoch_ms"] = frame_started_at_epoch_ms
+                payload["capture_completed_at_epoch_ms"] = (
+                    capture_completed_at_epoch_ms
+                )
+                payload["prediction_completed_at_epoch_ms"] = (
+                    prediction_completed_at_epoch_ms
+                )
                 telemetry.publish(payload)
 
             if config.ENABLE_IMAGE_STREAM and show_frame(

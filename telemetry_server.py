@@ -84,6 +84,20 @@ def build_telemetry_payload(
 
 
 class _NoCacheRequestHandler(SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.split("?", 1)[0] == "/time":
+            body = json.dumps(
+                {"server_time_epoch_ms": time.time() * 1000.0},
+                separators=(",", ":"),
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        super().do_GET()
+
     def end_headers(self):
         self.send_header("Cache-Control", "no-store")
         super().end_headers()
