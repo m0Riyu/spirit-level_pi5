@@ -136,5 +136,31 @@ class TelemetryServerIntegrationTests(unittest.TestCase):
             return json.loads(raw)
 
 
+class DashboardLayoutTests(unittest.TestCase):
+    def test_bubble_card_precedes_other_measurements(self):
+        html = (Path(__file__).parent / "dashboard" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        bubble_card = html.index('<section class="card level-visual">')
+        state_card = html.index('id="stateCard"')
+        slope_card = html.index('<section class="card hero-reading">')
+        self.assertLess(bubble_card, state_card)
+        self.assertLess(bubble_card, slope_card)
+
+    def test_performance_metrics_are_collapsed_by_default(self):
+        html = (Path(__file__).parent / "dashboard" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('<details class="card diagnostics">', html)
+        self.assertNotIn('<details class="card diagnostics" open>', html)
+        for label in (
+            "傳輸效率",
+            "數據延遲",
+            "推理時間",
+            "系統總延遲",
+        ):
+            self.assertIn(label, html)
+
+
 if __name__ == "__main__":
     unittest.main()

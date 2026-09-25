@@ -112,6 +112,56 @@
       background: var(--line);
     }
 
+    .diagnostics > summary {
+      min-height: 72px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px 20px;
+      color: var(--muted);
+      cursor: pointer;
+      list-style: none;
+      user-select: none;
+    }
+
+    .diagnostics > summary::-webkit-details-marker { display: none; }
+
+    .summary-copy strong {
+      display: block;
+      color: var(--text);
+      font-size: 16px;
+    }
+
+    .summary-copy span {
+      display: block;
+      margin-top: 3px;
+      font-size: 12px;
+    }
+
+    .more-button {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      flex: 0 0 auto;
+      border: 1px solid var(--line);
+      border-radius: 50%;
+      color: var(--mint);
+      background: rgba(100, 241, 196, 0.07);
+      font-size: 25px;
+      font-weight: 900;
+      line-height: 1;
+      transition: transform 180ms ease, background 180ms ease;
+    }
+
+    .diagnostics[open] .more-button {
+      transform: rotate(90deg);
+      background: rgba(100, 241, 196, 0.14);
+    }
+
+    .diagnostics .metrics { border-top: 1px solid var(--line); }
+
     .metric {
       min-height: 134px;
       display: flex;
@@ -298,22 +348,18 @@
       </div>
     </header>
 
-    <section class="card metrics" aria-label="效能指標">
-      <div class="metric">
-        <div class="label">傳輸效率</div>
-        <div id="rate" class="metric-value mint">—</div>
+    <section class="card level-visual">
+      <div class="level-head">
+        <div class="label">氣泡相對刻度中心</div>
+        <div id="divisions" class="division">— div</div>
       </div>
-      <div class="metric">
-        <div class="label">數據延遲</div>
-        <div id="latency" class="metric-value yellow">—</div>
+      <div class="track" aria-label="氣泡位置">
+        <div id="bubble" class="bubble"></div>
       </div>
-      <div class="metric">
-        <div class="label">推理時間</div>
-        <div id="inference" class="metric-value cyan">—</div>
-      </div>
-      <div class="metric">
-        <div class="label">系統總延遲</div>
-        <div id="totalLatency" class="metric-value orange">—</div>
+      <div class="detail-row">
+        <div class="detail"><span>信心度</span><strong id="confidence">—</strong></div>
+        <div class="detail"><span>FPS</span><strong id="fps">—</strong></div>
+        <div class="detail"><span>Frame</span><strong id="frameId">—</strong></div>
       </div>
     </section>
 
@@ -338,20 +384,33 @@
       </div>
     </section>
 
-    <section class="card level-visual">
-      <div class="level-head">
-        <div class="label">氣泡相對刻度中心</div>
-        <div id="divisions" class="division">— div</div>
-      </div>
-      <div class="track" aria-label="氣泡位置">
-        <div id="bubble" class="bubble"></div>
-      </div>
-      <div class="detail-row">
-        <div class="detail"><span>信心度</span><strong id="confidence">—</strong></div>
-        <div class="detail"><span>畫面率</span><strong id="fps">—</strong></div>
-        <div class="detail"><span>Frame</span><strong id="frameId">—</strong></div>
-      </div>
-    </section>
+    <details class="card diagnostics">
+      <summary>
+        <span class="summary-copy">
+          <strong>效能資訊</strong>
+          <span>傳輸、延遲與推理數據</span>
+        </span>
+        <span class="more-button" aria-hidden="true">•••</span>
+      </summary>
+      <section class="metrics" aria-label="效能指標">
+        <div class="metric">
+          <div class="label">傳輸效率</div>
+          <div id="rate" class="metric-value mint">—</div>
+        </div>
+        <div class="metric">
+          <div class="label">數據延遲</div>
+          <div id="latency" class="metric-value yellow">—</div>
+        </div>
+        <div class="metric">
+          <div class="label">推理時間</div>
+          <div id="inference" class="metric-value cyan">—</div>
+        </div>
+        <div class="metric">
+          <div class="label">系統總延遲</div>
+          <div id="totalLatency" class="metric-value orange">—</div>
+        </div>
+      </section>
+    </details>
 
     <footer>
       <div id="lastUpdate">尚未收到資料</div>
