@@ -318,6 +318,12 @@
       transition: left 100ms linear, opacity 160ms ease;
     }
 
+    .bubble.out-of-range {
+      border-color: rgba(255, 255, 255, 0.9);
+      background: radial-gradient(circle at 35% 30%, #fff1ef, var(--red) 32%, #8f211d 72%);
+      box-shadow: 0 0 28px rgba(255, 102, 95, 0.62);
+    }
+
     .detail-row {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
@@ -518,12 +524,15 @@
       ui.stateCard.className = "card state-card " + normalized.toLowerCase();
     }
 
-    function showOutOfRange() {
+    function showOutOfRange(measurement) {
+      const isLeft = Number(measurement.offset_px) < 0;
       ui.slope.textContent = "超出範圍";
       ui.pixels.textContent = "—";
       ui.angle.textContent = "—";
-      ui.divisions.textContent = "— div";
-      ui.bubble.style.opacity = "0.25";
+      ui.divisions.textContent = `${isLeft ? "偏左" : "偏右"} · 超出範圍`;
+      ui.bubble.style.left = isLeft ? "5%" : "95%";
+      ui.bubble.style.opacity = "1";
+      ui.bubble.classList.add("out-of-range");
     }
 
     function clearMeasurements(state = "WAITING") {
@@ -534,6 +543,7 @@
       ui.divisions.textContent = "— div";
       ui.confidence.textContent = "—";
       ui.bubble.style.opacity = "0.25";
+      ui.bubble.classList.remove("out-of-range");
     }
 
     function updatePerformanceMetrics() {
@@ -607,9 +617,10 @@
         const divisions = Math.max(-5, Math.min(5, Number(measurement.offset_div)));
         ui.bubble.style.left = `${50 + divisions * 9}%`;
         ui.bubble.style.opacity = "1";
+        ui.bubble.classList.remove("out-of-range");
       } else if (measurement.valid) {
         ui.confidence.textContent = number((data.confidence || 0) * 100, 1, "%");
-        showOutOfRange();
+        showOutOfRange(measurement);
       } else {
         clearMeasurements(data.system_state);
       }

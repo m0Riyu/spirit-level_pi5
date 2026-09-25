@@ -213,7 +213,9 @@ class DashboardLayoutTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn('OUT_OF_RANGE: "超出範圍"', html)
-        self.assertIn("function showOutOfRange()", html)
+        self.assertIn("function showOutOfRange(measurement)", html)
+        self.assertIn('ui.bubble.style.left = isLeft ? "5%" : "95%"', html)
+        self.assertIn('`${isLeft ? "偏左" : "偏右"} · 超出範圍`', html)
         self.assertIn(
             "measurement.valid && measurement.within_official_range", html
         )
