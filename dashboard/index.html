@@ -189,6 +189,13 @@
       font-variant-numeric: tabular-nums;
     }
 
+    .metric-note {
+      margin-top: 8px;
+      color: #627a73;
+      font-size: 11px;
+      font-weight: 650;
+    }
+
     .mint { color: var(--mint); }
     .yellow { color: var(--yellow); }
     .cyan { color: var(--cyan); }
@@ -388,7 +395,7 @@
       <summary>
         <span class="summary-copy">
           <strong>效能資訊</strong>
-          <span>傳輸、延遲與推理數據</span>
+          <span>3 秒平均與滾動中位數</span>
         </span>
         <span class="more-button" aria-hidden="true">•••</span>
       </summary>
@@ -396,18 +403,22 @@
         <div class="metric">
           <div class="label">傳輸效率</div>
           <div id="rate" class="metric-value mint">—</div>
+          <div class="metric-note">最近 3 秒平均</div>
         </div>
         <div class="metric">
           <div class="label">數據延遲</div>
           <div id="latency" class="metric-value yellow">—</div>
+          <div class="metric-note">最近 15 次中位數</div>
         </div>
         <div class="metric">
           <div class="label">推理時間</div>
           <div id="inference" class="metric-value cyan">—</div>
+          <div class="metric-note">最近 30 幀中位數</div>
         </div>
         <div class="metric">
           <div class="label">系統總延遲</div>
           <div id="totalLatency" class="metric-value orange">—</div>
+          <div class="metric-note">處理＋網路中位數</div>
         </div>
       </section>
     </details>
@@ -440,9 +451,16 @@
     let socket;
     let reconnectDelay = 500;
     let pingTimer;
-    let latestOneWayLatency = null;
     let lastTelemetryAt = 0;
     let messageTimes = [];
+    let latencySamples = [];
+    let inferenceSamples = [];
+    let processingSamples = [];
+    let performanceWindowStartedAt = performance.now();
+
+    const RATE_WINDOW_MS = 3000;
+    const LATENCY_SAMPLE_COUNT = 15;
+    const FRAME_SAMPLE_COUNT = 30;
 
     const number = (value, digits, unit, signed = false) => {
       if (value === null || value === undefined || !Number.isFinite(Number(value))) return "—";
@@ -450,6 +468,22 @@
       const prefix = signed && numeric > 0 ? "+" : "";
       return `${prefix}${numeric.toFixed(digits)} ${unit}`;
     };
+
+    function pushSample(samples, value, maximumLength) {
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric)) return;
+      samples.push(numeric);
+      if (samples.length > maximumLength) samples.shift();
+    }
+
+    function median(samples) {
+      if (!samples.length) return null;
+      const sorted = [...samples].sort((a, b) => a - b);
+      const middle = Math.floor(sorted.length / 2);
+      return sorted.length % 2
+        ? sorted[middle]
+        : (sorted[middle - 1] + sorted[middle]) / 2;
+    }
 
     function setConnection(online, text) {
       ui.connection.classList.toggle("online", online);
@@ -472,25 +506,51 @@
       ui.bubble.style.opacity = "0.25";
     }
 
-    function updateRate() {
-      const cutoff = performance.now() - 1000;
+    function updatePerformanceMetrics() {
+      const now = performance.now();
+      const cutoff = now - RATE_WINDOW_MS;
       messageTimes = messageTimes.filter((value) => value >= cutoff);
-      ui.rate.textContent = `${messageTimes.length} 筆/秒`;
+      const observedMs = Math.min(
+        RATE_WINDOW_MS,
+        Math.max(1000, now - performanceWindowStartedAt)
+      );
+      const rate = messageTimes.length / (observedMs / 1000);
+      ui.rate.textContent = `${rate.toFixed(rate >= 10 ? 0 : 1)} 筆/秒`;
+
+      const latency = median(latencySamples);
+      const inference = median(inferenceSamples);
+      const processing = median(processingSamples);
+      ui.latency.textContent = number(latency, 1, "ms");
+      ui.inference.textContent = number(inference, 1, "ms");
+      ui.totalLatency.textContent = (
+        processing === null || latency === null
+          ? "—"
+          : number(processing + latency, 1, "ms")
+      );
+    }
+
+    function resetPerformanceMetrics() {
+      messageTimes = [];
+      latencySamples = [];
+      inferenceSamples = [];
+      processingSamples = [];
+      performanceWindowStartedAt = performance.now();
+      ui.rate.textContent = "—";
+      ui.latency.textContent = "—";
+      ui.inference.textContent = "—";
+      ui.totalLatency.textContent = "—";
     }
 
     function renderTelemetry(data) {
       lastTelemetryAt = Date.now();
       messageTimes.push(performance.now());
-      updateRate();
 
       const performanceData = data.performance || {};
       const measurement = data.measurement || {};
-      ui.inference.textContent = number(performanceData.inference_ms, 1, "ms");
+      pushSample(inferenceSamples, performanceData.inference_ms, FRAME_SAMPLE_COUNT);
+      pushSample(processingSamples, performanceData.processing_ms, FRAME_SAMPLE_COUNT);
       ui.fps.textContent = number(performanceData.fps, 1, "fps");
       ui.frameId.textContent = data.frame_id ?? "—";
-      ui.latency.textContent = number(latestOneWayLatency, 1, "ms");
-      const total = Number(performanceData.processing_ms) + Number(latestOneWayLatency || 0);
-      ui.totalLatency.textContent = number(total, 1, "ms");
       setState(data.system_state);
 
       if (measurement.valid) {
@@ -517,6 +577,7 @@
       socket.addEventListener("open", () => {
         reconnectDelay = 500;
         setConnection(true, "已連線");
+        resetPerformanceMetrics();
         clearInterval(pingTimer);
         pingTimer = setInterval(() => {
           if (socket.readyState === WebSocket.OPEN) {
@@ -533,9 +594,7 @@
         try { data = JSON.parse(event.data); } catch { return; }
         if (data.type === "pong" && Number.isFinite(Number(data.client_sent_epoch_ms))) {
           const sample = Math.max(0, (Date.now() - Number(data.client_sent_epoch_ms)) / 2);
-          latestOneWayLatency = latestOneWayLatency === null
-            ? sample
-            : latestOneWayLatency * 0.7 + sample * 0.3;
+          pushSample(latencySamples, sample, LATENCY_SAMPLE_COUNT);
           return;
         }
         if (data.type === "telemetry") renderTelemetry(data);
@@ -545,6 +604,7 @@
         clearInterval(pingTimer);
         setConnection(false, "已斷線");
         clearMeasurements("NO SIGNAL");
+        resetPerformanceMetrics();
         setTimeout(connect, reconnectDelay);
         reconnectDelay = Math.min(8000, reconnectDelay * 1.7);
       });
@@ -553,11 +613,12 @@
     }
 
     setInterval(() => {
-      updateRate();
       if (lastTelemetryAt && Date.now() - lastTelemetryAt > 2500) {
         clearMeasurements("NO SIGNAL");
       }
     }, 250);
+
+    setInterval(updatePerformanceMetrics, 500);
 
     connect();
   </script>

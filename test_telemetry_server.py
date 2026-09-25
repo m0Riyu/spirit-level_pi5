@@ -161,6 +161,16 @@ class DashboardLayoutTests(unittest.TestCase):
         ):
             self.assertIn(label, html)
 
+    def test_performance_metrics_use_rolling_aggregates(self):
+        html = (Path(__file__).parent / "dashboard" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("const RATE_WINDOW_MS = 3000", html)
+        self.assertIn("const LATENCY_SAMPLE_COUNT = 15", html)
+        self.assertIn("const FRAME_SAMPLE_COUNT = 30", html)
+        self.assertIn("function median(samples)", html)
+        self.assertIn("setInterval(updatePerformanceMetrics, 500)", html)
+
 
 if __name__ == "__main__":
     unittest.main()
