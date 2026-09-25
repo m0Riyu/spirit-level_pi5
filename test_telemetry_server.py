@@ -51,7 +51,7 @@ class TelemetryPayloadTests(unittest.TestCase):
             self.measurement,
             self.timings,
             mm_per_m_per_div=0.02,
-            level_tolerance_px=1.0,
+            level_tolerance_mm_per_m=0.01,
         )
 
     def test_uses_json_pitch_for_physical_conversion(self):
@@ -67,9 +67,27 @@ class TelemetryPayloadTests(unittest.TestCase):
         self.assertEqual(payload["system_state"], "ADJUST")
 
     def test_small_offset_is_level(self):
-        self.measurement.offset_px = 0.5
-        self.measurement.offset_div = 0.5 / 19.0
+        self.measurement.offset_px = 5.0
+        self.measurement.offset_div = 5.0 / 19.0
         self.assertEqual(self.build()["system_state"], "LEVEL")
+
+    def test_positive_boundary_is_level(self):
+        self.measurement.offset_px = 9.5
+        self.measurement.offset_div = 0.5
+        self.assertAlmostEqual(
+            self.measurement.offset_px / 950.0, 0.01
+        )
+        self.assertEqual(self.build()["system_state"], "LEVEL")
+
+    def test_negative_boundary_is_level(self):
+        self.measurement.offset_px = -9.5
+        self.measurement.offset_div = -0.5
+        self.assertEqual(self.build()["system_state"], "LEVEL")
+
+    def test_outside_level_range_requires_adjustment(self):
+        self.measurement.offset_px = 9.6
+        self.measurement.offset_div = 9.6 / 19.0
+        self.assertEqual(self.build()["system_state"], "ADJUST")
 
     def test_missing_detection_is_searching(self):
         self.detection.detected = 0

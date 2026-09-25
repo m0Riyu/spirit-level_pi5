@@ -55,6 +55,9 @@ slope_mm_per_m = bubble_offset_px / PIXELS_PER_1_MMM
 angle_degrees = atan(slope_mm_per_m / 1000)
 ```
 
+系統狀態以坡度判定：`-0.01 ≤ slope_mm_per_m ≤ 0.01` 為 `LEVEL`；
+超出此範圍為 `ADJUST`。
+
 ## 先看這裡
 
 進行即時刻度量測時，主要執行：

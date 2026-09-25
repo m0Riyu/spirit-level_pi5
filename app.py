@@ -157,7 +157,9 @@ def run():
                     measurement,
                     timings,
                     mm_per_m_per_div=config.MM_PER_M_PER_DIV,
-                    level_tolerance_px=config.LEVEL_TOLERANCE_PX,
+                    level_tolerance_mm_per_m=(
+                        config.LEVEL_TOLERANCE_MM_PER_M
+                    ),
                 )
                 payload["frame_started_at_epoch_ms"] = frame_started_at_epoch_ms
                 telemetry.publish(payload)

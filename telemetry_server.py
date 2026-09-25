@@ -18,7 +18,7 @@ def build_telemetry_payload(
     timings,
     *,
     mm_per_m_per_div,
-    level_tolerance_px,
+    level_tolerance_mm_per_m,
 ):
     """Build the versioned JSON message sent to dashboard clients."""
     valid = bool(detection.detected and measurement.valid)
@@ -31,7 +31,7 @@ def build_telemetry_payload(
         angle_degrees = math.degrees(math.atan(slope_mm_per_m / 1000.0))
         system_state = (
             "LEVEL"
-            if abs(offset_px) <= float(level_tolerance_px)
+            if abs(slope_mm_per_m) <= float(level_tolerance_mm_per_m)
             else "ADJUST"
         )
     else:
