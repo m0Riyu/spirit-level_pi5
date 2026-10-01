@@ -11,6 +11,13 @@ python3 -m venv --system-site-packages .venv
 .venv/bin/python main.py
 ```
 
+對焦使用 `../live_yolo1_app_judy/camera_calibration/vcm_focus_absolute_test.py` 相同的 AK7375
+V4L2 `focus_absolute` 控制方式。`config.py` 預設為
+`VCM_FOCUS_ABSOLUTE = 3711`、`VCM_FOCUS_SETTLE_SECONDS = 0.25`；啟動相機後
+會自動尋找馬達裝置、依驅動範圍與步距設定並讀回確認，再開始擷取影像。
+需要系統已安裝 `v4l2-ctl`（Debian/Raspberry Pi OS 的 `v4l-utils`）。
+啟動時終端會顯示設定值與實際值，設定失敗會停止啟動並釋放相機。
+
 程式使用刻度校正 JSON 中的：
 
 - `reference_midpoint_x = 373.0 px` 作為刻度零點。

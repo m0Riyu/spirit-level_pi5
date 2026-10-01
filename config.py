@@ -24,7 +24,9 @@ ROI_X2 = ROI_X1 + ROI_WIDTH
 ROI_Y2 = ROI_Y1 + ROI_HEIGHT
 
 CONFIDENCE_THRESHOLD = 0.25
-LENS_POSITION = 12.0
+# AK7375 V4L2 focus_absolute (vcm_focus_absolute_test.py DEFAULT_INITIAL).
+VCM_FOCUS_ABSOLUTE = 3711
+VCM_FOCUS_SETTLE_SECONDS = 0.25
 
 # Bubble position calibration. Coordinates in this JSON are relative to the
 # same 740 x 160 ROI used by the YOLO detector.
