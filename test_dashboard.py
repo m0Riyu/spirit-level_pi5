@@ -24,6 +24,11 @@ BROWSER_SCENARIOS = r"""
   const { PhoneLogStore, PhoneCaptureController, phoneCsv } = CaptureLog;
   const checks = [];
   const assert = (condition, label) => { if (!condition) throw new Error(label); checks.push(label); };
+  assert(CaptureLog.taipeiIso(1767225600000) === "2026-01-01T08:00:00.000+08:00", "phone timestamps use Taipei independently of device timezone");
+  const compactCard = document.querySelector('.capture-controls');
+  assert(compactCard.children.length === 3 && compactCard.querySelectorAll('button').length === 2,
+    "compact capture card only contains two buttons and count text");
+  assert(compactCard.getBoundingClientRect().height <= 110, "capture controls stay flat at phone width");
   const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
   const eventually = async (condition) => {
     for (let i = 0; i < 150; i++) { if (await condition()) return; await wait(15); }
@@ -74,6 +79,10 @@ BROWSER_SCENARIOS = r"""
   assert(rows.length === 1, "saved reply updates same IndexedDB row");
   assert(rows[0].request_id === posts[0].request_id && rows[0].pi_frame_id === 42, "Pi IDs pair with frozen phone row");
   assert(rows[0].message_rate_hz_at_press === 12.3, "metrics frozen before asynchronous POST");
+  for (const field of ["client_pressed_at_iso", "trigger_ack_received_at_iso", "pi_saved_response_received_at_iso"]) {
+    assert(rows[0][field].endsWith("+08:00") && Date.parse(rows[0][field]) === rows[0][field.replace("_iso", "_epoch_ms")],
+      `${field} uses Taipei offset and preserves epoch`);
+  }
   assert(rows[0].button_to_saved_response_ms >= 0 && rows[0].status_poll_count >= 1, "monotonic completion and polling counters");
   assert(ui.record.textContent === "test_session_000001", "record_id shown on page");
   controller.store.db.close();
@@ -109,8 +118,10 @@ BROWSER_SCENARIOS = r"""
   });
   await failure.init(); await failure.press();
   await eventually(async () => (await failure.store.all()).some(row => row.status === "error"));
+  await eventually(() => failure.running.size === 0);
   const errorRow = (await failure.store.all()).find(row => row.status === "error");
   assert(errorRow.error_code === "IMAGE_WRITE_FAILED", "Pi error persisted in phone IndexedDB");
+  assert(errorUi.count.textContent.includes("IMAGE_WRITE_FAILED"), "compact count line shows capture errors");
 
   recovery.requireStable = true;
   recovery.updateButton();
@@ -139,6 +150,10 @@ BROWSER_SCENARIOS = r"""
   ]);
   assert(csv.charCodeAt(0) === 0xFEFF && csv.indexOf('"pending"') < csv.indexOf('"saved"'), "UTF8 BOM CSV sorted by press time");
   assert(csv.includes('"comma, quote""\nnewline"'), "CSV escapes commas double quotes and newlines");
+  const legacyCsv = phoneCsv([{request_id: "old", client_pressed_at_iso: "2026-01-01T00:00:00.000Z",
+    client_pressed_at_epoch_ms: 1767225600000}]);
+  assert(legacyCsv.includes("2026-01-01T08:00:00.000+08:00") && !legacyCsv.includes("00:00:00.000Z"),
+    "existing UTC phone records export in Taipei timezone");
   assert(document.querySelector("img,video,canvas") === null, "dashboard receives no image stream");
   assert(document.querySelector("input,textarea") === null, "no reference/platform/note input");
   assert(document.getElementById("stabilityCard").tagName === "DETAILS", "collapsible stability card exists");
@@ -161,7 +176,7 @@ class DashboardContractTests(unittest.TestCase):
         self.js = (config.APP_DIRECTORY / "dashboard/capture-log.js").read_text()
 
     def test_stability_details_and_capture_controls_exist(self):
-        for value in ('id="stabilityCard"', 'id="captureButton"', 'id="exportPhoneLog"', 'id="lastRecordId"'):
+        for value in ('id="stabilityCard"', 'id="captureButton"', 'id="exportPhoneLog"', 'id="phoneLogCount"'):
             self.assertIn(value, self.html)
 
     def test_no_image_stream_or_reference_inputs(self):
@@ -185,8 +200,9 @@ class BrowserCaptureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as profile:
             browser_log = open(Path(profile) / "browser_stderr.txt", "w+")
             binary = "/usr/lib/chromium/chromium" if Path("/usr/lib/chromium/chromium").is_file() else shutil.which("chromium")
-            process = subprocess.Popen([binary, "--headless", "--no-sandbox", "--disable-gpu",
-                "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check", "--no-proxy-server",
+            process = subprocess.Popen([binary, "--headless=new", "--disable-gpu",
+                "--password-store=basic", "--disable-dev-shm-usage", "--no-first-run",
+                "--no-default-browser-check", "--no-proxy-server",
                 "--remote-debugging-port=0", f"--user-data-dir={profile}",
                 (config.APP_DIRECTORY / "dashboard/index.html").as_uri() + "?wsPort=1"],
                 stdout=subprocess.DEVNULL, stderr=browser_log)
@@ -195,7 +211,9 @@ class BrowserCaptureTests(unittest.TestCase):
                 deadline = time.monotonic() + 20
                 while not port_path.exists():
                     if process.poll() is not None or time.monotonic() > deadline:
-                        self.fail("Chromium did not start")
+                        browser_log.flush()
+                        browser_log.seek(0)
+                        self.fail("Chromium did not start: " + browser_log.read()[-3000:])
                     time.sleep(.05)
                 port = int(port_path.read_text().splitlines()[0])
                 with urlopen(f"http://127.0.0.1:{port}/json", timeout=3) as response:
@@ -212,10 +230,19 @@ class BrowserCaptureTests(unittest.TestCase):
                             if result.get("id") == call_id:
                                 self.assertNotIn("error", result)
                                 return result["result"]
+                    call("Emulation.setTimezoneOverride", {"timezoneId": "America/New_York"})
+                    call("Emulation.setDeviceMetricsOverride", {"width": 390, "height": 844, "deviceScaleFactor": 1, "mobile": True})
                     # Load the real assets directly; API responses are fakes,
                     # IndexedDB is genuine. LAN HTTP transport has separate API tests.
+                    call("Runtime.evaluate", {"expression": """
+                        new Promise(resolve => {
+                          if (document.readyState === 'loading') {
+                            document.addEventListener('DOMContentLoaded', () => resolve(true), {once:true});
+                          } else resolve(true);
+                        })
+                    """, "awaitPromise": True, "returnByValue": True})
                     for _ in range(200):
-                        result = call("Runtime.evaluate", {"expression": "typeof CaptureLog !== 'undefined' && typeof phoneCapture !== 'undefined'"})
+                        result = call("Runtime.evaluate", {"expression": "document.readyState !== 'loading' && document.querySelector('#captureButton') !== null && typeof CaptureLog !== 'undefined' && typeof phoneCapture !== 'undefined'"})
                         if result.get("result", {}).get("value"): break
                         time.sleep(.025)
                     browser_log.flush()

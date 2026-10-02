@@ -14,6 +14,20 @@
   ).split(" ");
   const TERMINAL = new Set(["saved", "rejected", "error"]);
 
+  function taipeiIso(epochMs = Date.now()) {
+    return new Date(Number(epochMs) + 8 * 60 * 60 * 1000).toISOString().slice(0, -1) + "+08:00";
+  }
+
+  function normalizePhoneTimes(row) {
+    const normalized = { ...row };
+    for (const field of PHONE_LOG_FIELDS.filter(name => name.endsWith("_at_iso"))) {
+      const epoch = row[field.slice(0, -4) + "_epoch_ms"];
+      const numeric = epoch == null ? Date.parse(row[field]) : Number(epoch);
+      if (Number.isFinite(numeric)) normalized[field] = taipeiIso(numeric);
+    }
+    return normalized;
+  }
+
   function uuid() {
     // crypto.randomUUID needs HTTPS; getRandomValues also works on a LAN HTTP URL.
     if (crypto.randomUUID) return crypto.randomUUID();
@@ -27,7 +41,7 @@
   function phoneCsv(rows) {
     const escape = (value) => `"${String(value ?? "").replaceAll('"', '""')}"`;
     const sorted = [...rows].sort((a, b) => a.client_pressed_at_epoch_ms - b.client_pressed_at_epoch_ms);
-    return "\uFEFF" + [PHONE_LOG_FIELDS, ...sorted.map((row) => PHONE_LOG_FIELDS.map((name) => row[name]))]
+    return "\uFEFF" + [PHONE_LOG_FIELDS, ...sorted.map(normalizePhoneTimes).map((row) => PHONE_LOG_FIELDS.map((name) => row[name]))]
       .map((row) => row.map(escape).join(",")).join("\r\n") + "\r\n";
   }
 
@@ -61,7 +75,8 @@
     }
     put(row) {
       return this.transaction("readwrite", (store, done) => {
-        store.put(row).onsuccess = () => done(row);
+        const normalized = normalizePhoneTimes(row);
+        store.put(normalized).onsuccess = () => done(normalized);
       });
     }
     update(requestId, changes) {
@@ -69,7 +84,7 @@
         store.get(requestId).onsuccess = (event) => {
           const previous = event.target.result;
           if (!previous) throw new Error("手機 LOG request 查無紀錄");
-          const row = { ...previous, ...changes, request_id: requestId };
+          const row = normalizePhoneTimes({ ...previous, ...changes, request_id: requestId });
           store.put(row).onsuccess = () => done(row);
         };
       });
@@ -93,6 +108,9 @@
       this.requireStable = false;
       this.running = new Set();
       this.pressing = false;
+      this.countSummary = "手機端紀錄：0 筆 · 已配對：0 筆 · 等待中：0 筆 · 失敗：0 筆";
+      this.statusMessage = "";
+      this.errorMessage = "";
       this.pageId = uuid();
       this.ui.button.disabled = true;
       this.ui.button.addEventListener("click", () => this.press());
@@ -104,7 +122,7 @@
         this.storageReady = true;
         const rows = await this.refreshCounts();
         const pending = rows.filter((row) => !TERMINAL.has(row.status));
-        if (pending.length) this.ui.status.textContent = "恢復查詢先前尚未完成的要求…";
+        if (pending.length) this.notify("恢復查詢先前尚未完成的要求…");
         // Reserve every pending ID before enabling a new press.
         for (const row of pending) this.running.add(row.request_id);
         for (const row of pending) this.run(row, false);
@@ -114,7 +132,7 @@
     }
     storageError(error) {
       this.storageReady = false;
-      this.ui.status.textContent = `手機 LOG 無法保存：${error.message}。請確認瀏覽器儲存權限。`;
+      this.notify(`手機 LOG 無法保存：${error.message}。請確認瀏覽器儲存權限。`, true);
       this.updateButton();
     }
     async refreshReady() {
@@ -129,8 +147,20 @@
       const snapshot = this.snapshot();
       this.ui.button.disabled = !this.storageReady || !this.httpReady || !snapshot.online ||
         this.pressing || this.running.size > 0 || (this.requireStable && !snapshot.stable);
-      this.ui.warning.textContent = snapshot.stable ? "氣泡穩定，可記錄。" :
+      const warning = snapshot.stable ? "氣泡穩定，可記錄。" :
         (this.requireStable ? "必須等待氣泡穩定才能記錄。" : "氣泡尚未穩定；仍可記錄，Pi LOG 將保存當下狀態。");
+      if (this.ui.warning) this.ui.warning.textContent = warning;
+      this.ui.button.title = [warning, this.statusMessage].filter(Boolean).join("\n");
+    }
+    notify(message, error = false) {
+      this.statusMessage = message;
+      this.errorMessage = error ? message : "";
+      if (this.ui.status) this.ui.status.textContent = message;
+      this.renderCount();
+    }
+    renderCount() {
+      this.ui.count.textContent = this.countSummary + (this.errorMessage ? ` · ${this.errorMessage}` : "");
+      this.ui.count.title = this.statusMessage;
     }
     async refreshCounts() {
       let rows;
@@ -138,9 +168,10 @@
       catch (error) { this.storageError(error); throw error; }
       const saved = rows.filter((row) => row.status === "saved");
       const waiting = rows.filter((row) => !TERMINAL.has(row.status));
-      this.ui.count.textContent = `手機端紀錄：${rows.length} 筆 · 已配對：${saved.length} 筆 · 等待中：${waiting.length} 筆 · 失敗：${rows.length - saved.length - waiting.length} 筆`;
+      this.countSummary = `手機端紀錄：${rows.length} 筆 · 已配對：${saved.length} 筆 · 等待中：${waiting.length} 筆 · 失敗：${rows.length - saved.length - waiting.length} 筆`;
+      this.renderCount();
       saved.sort((a, b) => b.client_pressed_at_epoch_ms - a.client_pressed_at_epoch_ms);
-      this.ui.record.textContent = saved[0]?.record_id || "—";
+      if (this.ui.record) this.ui.record.textContent = saved[0]?.record_id || "—";
       return rows;
     }
     async updateRow(requestId, changes) {
@@ -157,13 +188,13 @@
       const row = Object.fromEntries(PHONE_LOG_FIELDS.map((name) => [name, null]));
       Object.assign(row, snapshot.fields, {
         request_id: uuid(), status: "pending", status_poll_count: 0,
-        client_pressed_at_iso: new Date(epoch).toISOString(), client_pressed_at_epoch_ms: epoch,
+        client_pressed_at_iso: taipeiIso(epoch), client_pressed_at_epoch_ms: epoch,
         // Internal-only timing fields, not exported or transmitted.
         _page_id: this.pageId, _pressed_perf_ms: pressedPerf,
       });
       this.running.add(row.request_id);
       this.updateButton();
-      this.ui.status.textContent = "已凍結手機數值，送出拍攝要求…";
+      this.notify("已凍結手機數值，送出拍攝要求…");
       try {
         await this.store.put(row); // Never trigger Pi unless phone pending row is durable.
         await this.refreshCounts();
@@ -205,7 +236,7 @@
               if (response.ok) {
                 const epoch = Date.now();
                 row = await this.updateRow(row.request_id, {
-                  trigger_ack_received_at_iso: row.trigger_ack_received_at_iso || new Date(epoch).toISOString(),
+                  trigger_ack_received_at_iso: normalizePhoneTimes(row).trigger_ack_received_at_iso || taipeiIso(epoch),
                   trigger_ack_received_at_epoch_ms: row.trigger_ack_received_at_epoch_ms || epoch,
                   trigger_ack_ms: row.trigger_ack_ms ?? (response.code === 202 ? this.elapsed(row) : null),
                 });
@@ -226,14 +257,14 @@
               }
               if (["pending", "processing"].includes(response.data.status)) {
                 row = await this.updateRow(row.request_id, { status: response.data.status });
-                this.ui.status.textContent = response.data.status === "processing" ? "Pi 正在處理並保存同幀 ROI…" : "等待 Pi 下一個完整處理幀…";
+                this.notify(response.data.status === "processing" ? "Pi 正在處理並保存同幀 ROI…" : "等待 Pi 下一個完整處理幀…");
               }
             }
           } catch (error) {
             // Network uncertainty keeps the original ID pending. A GET 404
             // later retries POST with that SAME ID; never create a second row.
             if (!this.storageReady) throw error;
-            this.ui.status.textContent = "連線或儲存回應尚未確認，使用原 request_id 繼續查詢…";
+            this.notify("連線或儲存回應尚未確認，使用原 request_id 繼續查詢…");
           }
           await new Promise((resolve) => setTimeout(resolve, this.pollMs));
         }
@@ -252,15 +283,15 @@
         Object.assign(changes, {
           session_id: response.session_id, sample_id: response.sample_id,
           record_id: response.record_id, pi_frame_id: response.frame_id,
-          pi_saved_response_received_at_iso: new Date(epoch).toISOString(),
+          pi_saved_response_received_at_iso: taipeiIso(epoch),
           pi_saved_response_received_at_epoch_ms: epoch,
           button_to_saved_response_ms: this.elapsed(row),
         });
       }
       await this.updateRow(row.request_id, changes);
       await this.refreshCounts();
-      this.ui.status.textContent = response.status === "saved" ? `保存成功：${response.record_id}` :
-        `拍攝${response.status === "rejected" ? "被拒絕" : "失敗"}：${response.error_code} · ${response.message}`;
+      this.notify(response.status === "saved" ? `保存成功：${response.record_id}` :
+        `拍攝${response.status === "rejected" ? "被拒絕" : "失敗"}：${response.error_code} · ${response.message}`, response.status !== "saved");
     }
     async export() {
       this.ui.export.disabled = true;
@@ -270,16 +301,16 @@
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
         link.href = url;
-        const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "_").slice(0, 15);
+        const stamp = taipeiIso().replace(/[-:]/g, "").replace("T", "_").slice(0, 15);
         link.download = `phone_capture_log_${stamp}.csv`;
         document.body.appendChild(link);
         link.click();
         link.remove();
         setTimeout(() => URL.revokeObjectURL(url), 10000);
-        this.ui.status.textContent = "已匯出手機端 LOG；瀏覽器紀錄仍保留，請確認下載檔案。";
-      } catch (error) { this.ui.status.textContent = `手機 LOG 匯出失敗：${error.message}`; }
+        this.notify("已匯出手機端 LOG；瀏覽器紀錄仍保留，請確認下載檔案。");
+      } catch (error) { this.notify(`手機 LOG 匯出失敗：${error.message}`, true); }
       finally { this.ui.export.disabled = false; }
     }
   }
-  window.CaptureLog = { PHONE_LOG_FIELDS, PhoneLogStore, PhoneCaptureController, phoneCsv, uuid };
+  window.CaptureLog = { PHONE_LOG_FIELDS, PhoneLogStore, PhoneCaptureController, phoneCsv, taipeiIso, uuid };
 })();

@@ -420,7 +420,9 @@ cd /home/user/my_project/live_yolo1_app
 
 手機與 Pi 連同一網路，開啟終端印出的 `http://<Pi IP>:8000`。
 WebSocket 為 `ws://<Pi IP>:8765`。先展開「氣泡穩定度」，等待顯示「穩定」，
-按「記錄並拍照」，等待保存成功與 `record_id`；實驗結束按「匯出手機端 LOG」。
+按「記錄並拍照」，確認「已配對」筆數增加；實驗結束按「匯出手機端 LOG」。
+量測操作區只保留兩個按鈕與手機紀錄筆數，採用緊湊排列；失敗訊息顯示在筆數列，
+record_id 保存在兩端 LOG，不另外占用頁面列。
 關閉本機預覽時以終端 `Ctrl+C` 結束；若啟用本機預覽，也可按 `q`。
 正常結束會保存已凍結的工作、將尚未選幀的要求標記為 `SERVER_SHUTDOWN`，
 不詢問是否刪除手動紀錄。
@@ -508,7 +510,10 @@ STABILITY_HOLD_SECONDS = 1.5
 目前無效或完整視窗有效率不足為 `NO_MEASUREMENT`；尚未填滿視窗為
 `WARMING_UP`；std/range 超標或符合波動條件但 hold 尚未滿為 `UNSTABLE`；
 波動條件連續維持至少 1.5 秒才為 `STABLE`。無效、有效率下降、std/range 超標
-均重置 hold。所有持續時間使用 `time.monotonic()`，LOG 日期使用帶時區 ISO 8601。
+均重置 hold。所有持續時間使用 `time.monotonic()`，兩端 LOG 日期統一為
+台灣 `Asia/Taipei`（UTC+08:00）的 ISO 8601，例如 `2026-10-02T09:35:00.000+08:00`。
+Pi 不依賴作業系統時區，手機不依賴瀏覽器時區；epoch ms 與延遲計算不變。
+session ID、Pi 舊逐幀 CSV（若啟用）及手機匯出檔名也使用台灣時間。
 
 這些是初始工程門檻，尚未經科學驗證。在 `config.py` 修改後重新啟動；std/range
 單位都是 mm/m。穩定只表示停止波動，固定傾角（包括 `ADJUST` 或 `OUT_OF_RANGE`）
@@ -516,7 +521,7 @@ STABILITY_HOLD_SECONDS = 1.5
 `slope = offset_div × 0.02`，`angle_degrees = degrees(atan(slope/1000))`。
 
 `REQUIRE_STABLE_FOR_CAPTURE = False` 時暖機、無有效量測、不穩定仍可保存，
-頁面提示警告，CSV 忠實記錄狀態；沒有偵測時座標留空，不填虛構 0。
+按鈕說明提示警告，CSV 忠實記錄狀態；沒有偵測時座標留空，不填虛構 0。
 設為 True 時手機停用按鍵，Pi 在選定幀完成穩定度計算後再次檢查，
 不符合則 `rejected / NOT_STABLE`，不寫圖片與樣本 row。
 
@@ -629,7 +634,7 @@ CPU 溫度讀 `/sys/class/thermal/thermal_zone0/temp`、load 使用 `os.getloada
 `session_metadata.json` 每次啟動一次，完整固定欄位：
 
 ```text
-schema_version, session_id, started_at_iso, hostname, git_commit, git_branch
+schema_version, session_id, started_at_iso, log_timezone, hostname, git_commit, git_branch
 python_version, model_path, model_image_size, camera_frame_width, camera_frame_height
 roi_width, roi_height, roi_x1, roi_y1, roi_x2, roi_y2, confidence_threshold
 calibration_source, camera_calibration_source, mm_per_m_per_div
@@ -650,7 +655,7 @@ Git 查詢失敗為 `unknown`。`image_stream_enabled` 仍表示本機預覽，
 頁面重新開啟會繼續 GET 查詢，若尚未成功送到 Pi，則以相同 UUID 重送 POST。
 IndexedDB 不可用時顯示錯誤、停用拍攝，不偷偷只保存在 JS 變數中。
 
-手機 CSV **完整 28 個欄位**：
+手機 CSV **完整 27 個欄位**：
 
 ```text
 request_id, session_id, sample_id, record_id, pi_frame_id, status, error_code, error_message
@@ -677,10 +682,11 @@ clock，恢復要求的這些時差留空，保留原 pressed timestamp 與數�
 `trigger_ack_ms` 只計收到 POST `202` 的時間；若遺失 `202` 回覆而重送只收到
 既有狀態 `200`，該值留空，ack 的接收日期仍記錄首次實際收到的成功 POST 回覆。
 
-按「匯出手機端 LOG」下載 `phone_capture_log_<UTC日期時間>.csv`，UTF-8 BOM、標準 CSV
+按「匯出手機端 LOG」下載 `phone_capture_log_<台灣日期時間>.csv`，UTF-8 BOM、標準 CSV
 逗號／雙引號／換行 escaping，按 `client_pressed_at_epoch_ms` 排序，包含 pending、
 processing、saved、rejected、error，匯出後不刪 IndexedDB。頁面顯示總數、已配對、
-等待與失敗筆數，以及最近成功 record ID。匯出失敗顯示訊息、原資料仍保留。
+等待與失敗筆數。既有手機 UTC 紀錄在匯出時轉為 `+08:00`，保留同一個 epoch 時點；
+不覆寫舊 Pi CSV 檔案。匯出失敗顯示訊息、原資料仍保留。
 無痕模式、清除網站資料、更換手機、改用不同 IP/hostname/port（不同 origin）可能
 遺失或看不到舊紀錄；每次實驗結束請匯出並確認下載檔案。
 
@@ -705,10 +711,13 @@ cd /home/user/my_project/live_yolo1_app
 新測試使用 fake frame/mock camera，檢查穩定度、同幀保存、背景失敗、API、
 重複要求與關閉。若安裝 Chromium，還會用真瀏覽器與 IndexedDB 驗證重送、
 紀錄恢復、數值凍結、按鈕停用、CSV escaping 與匯出失敗；缺少 Chromium 時
-只跳過該瀏覽器測試，其餘測試仍執行。
+只跳過該瀏覽器測試，其餘測試仍執行。瀏覽器測試使用獨立暫存 profile、
+`--headless=new --password-store=basic --no-first-run`，保留 Chromium sandbox；
+等待 DOMContentLoaded 與 `#captureButton`，不等待 networkidle，避免重連及
+定時查詢造成無限等待，也不呼叫桌面 Keyring。
 
 實機請依序驗證：啟動後無本機視窗、手機只顯示數值；等待穩定；按一次保存；
-檢查 Pi 一列與兩張 740×160 圖；匯出手機 CSV 比對 request/record/frame ID；
+檢查 Pi 一列與兩張 740×160 圖；匯出手機 CSV 比對 request/record/frame ID 與 `+08:00` 日期；
 拍攝後斷網及 pending 時重整，再連線確認仍是一筆；觀察 FPS 是否維持約 10、
 確認 telemetry 約 5 Hz；Ctrl+C 後無 Y/N，已成功檔案保留。
 相機色彩、小字可讀性、真手機 IndexedDB／下載、Wi-Fi 斷線恢復、長時間運作、

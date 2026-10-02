@@ -78,7 +78,7 @@ ENABLE_IMAGE_STREAM = False
 ENABLE_CONTINUOUS_CSV = False  # Legacy .csv.part / Y/N prompt only when True.
 
 # Engineering starting values, not scientifically validated thresholds.
-STABILITY_WINDOW_SIZE = 20
+STABILITY_WINDOW_SIZE = 50
 STABILITY_MIN_VALID_RATIO = 0.90
 STABILITY_MAX_STD_MM_PER_M = 0.002
 STABILITY_MAX_RANGE_MM_PER_M = 0.006

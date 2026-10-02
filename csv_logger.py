@@ -2,6 +2,7 @@
 
 import csv
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import config
 
@@ -62,7 +63,7 @@ CSV_FIELDS = [
 class CsvLogger:
     def __init__(self):
         config.LOG_DIRECTORY.mkdir(parents=True, exist_ok=True)
-        log_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_time = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y%m%d_%H%M%S")
         self.path = config.LOG_DIRECTORY / f"yolo_128x608_metrics_{log_time}.csv"
         self.temporary_path = self.path.with_suffix(".csv.part")
         self.file = open(
@@ -75,7 +76,7 @@ class CsvLogger:
     def write(self, frame_id, detection, measurement, timings):
         row = {
             "frame_id": frame_id,
-            "datetime": datetime.now().isoformat(timespec="milliseconds"),
+            "datetime": datetime.now(ZoneInfo("Asia/Taipei")).isoformat(timespec="milliseconds"),
             **detection.as_dict(),
             **measurement.as_dict(),
             **timings,

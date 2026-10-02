@@ -4,6 +4,7 @@ import csv
 import errno
 import io
 import json
+import os
 import sqlite3
 import tempfile
 import threading
@@ -78,6 +79,17 @@ class CaptureTests(unittest.TestCase):
     def rows(self):
         with self.manager.csv_path.open(newline="", encoding="utf-8") as file:
             return list(csv.DictReader(file))
+
+    def test_log_timezone_is_taipei_even_when_pi_system_timezone_is_utc(self):
+        try:
+            with patch.dict(os.environ, {"TZ": "UTC"}):
+                time.tzset()
+                iso, epoch = manual_capture.wall_time(1767225600000)
+                self.assertEqual(iso, "2026-01-01T08:00:00.000+08:00")
+                self.assertEqual(epoch, 1767225600000)
+        finally:
+            time.tzset()
+        self.assertEqual(manual_capture.session_metadata("test")["log_timezone"], "Asia/Taipei")
 
     def test_one_trigger_is_one_row_two_same_frame_images(self):
         request_id = self.trigger()
@@ -283,7 +295,7 @@ class CaptureTests(unittest.TestCase):
         with self.assertLogs("manual_capture", level="ERROR"):
             self.manager.close()
         self.assertFalse(self.manager._worker.is_alive())
-        with sqlite3.connect(self.manager.root / "capture_requests.sqlite3") as database:
+        with contextlib.closing(sqlite3.connect(self.manager.root / "capture_requests.sqlite3")) as database:
             statuses = {key: json.loads(raw) for key, raw in database.execute("SELECT request_id, response FROM requests")}
         self.assertEqual(statuses[saved_id]["status"], "saved")
         self.assertEqual(statuses[pending_id]["error_code"], "SERVER_SHUTDOWN")

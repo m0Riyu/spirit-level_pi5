@@ -344,12 +344,16 @@
       overflow-wrap: anywhere;
     }
 
-    .capture-controls { padding: 20px; }
-    .capture-controls button {
-      padding: 12px 18px; margin: 8px 6px 8px 0; border-radius: 12px;
-      border: 1px solid var(--mint); background: #123d30; color: #ecfff7;
-      font: inherit; font-weight: 700; cursor: pointer;
+    .capture-controls {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+      padding: 10px 12px;
     }
+    .capture-controls button {
+      padding: 8px 12px; margin: 0; border-radius: 10px; white-space: nowrap;
+      border: 1px solid var(--mint); background: #123d30; color: #ecfff7;
+      font: inherit; font-size: 14px; font-weight: 700; cursor: pointer;
+    }
+    .capture-controls .capture-note { flex: 1 1 260px; line-height: 1.5; }
     .capture-controls button:disabled { opacity: .4; cursor: wait; }
     .capture-note { color: var(--muted); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
     .stability-label { color: #e9ce70; }
@@ -379,6 +383,12 @@
       </div>
     </header>
 
+    <section class="card capture-controls" aria-label="手動拍攝">
+      <button id="captureButton" type="button" disabled>記錄並拍照</button>
+      <button id="exportPhoneLog" type="button">匯出手機端 LOG</button>
+      <div id="phoneLogCount" class="capture-note" role="status" aria-live="polite">手機端紀錄：0 筆 · 已配對：0 筆 · 等待中：0 筆 · 失敗：0 筆</div>
+    </section>
+
     <section class="card level-visual">
       <div class="level-head">
         <div class="label">氣泡相對刻度中心</div>
@@ -392,32 +402,6 @@
         <div class="detail"><span>FPS</span><strong id="fps">—</strong></div>
         <div class="detail"><span>Frame</span><strong id="frameId">—</strong></div>
       </div>
-    </section>
-
-    <details class="card diagnostics" id="stabilityCard">
-      <summary><span class="summary-copy"><strong>氣泡穩定度</strong>
-        <span id="stabilityState" class="stability-label">暖機中</span></span>
-        <span class="more-button" aria-hidden="true">•••</span></summary>
-      <section class="metrics" aria-label="穩定度指標">
-        <div class="metric"><div class="label">最近樣本數</div><div id="stabilitySamples" class="metric-value">—</div></div>
-        <div class="metric"><div class="label">有效率</div><div id="stabilityRatio" class="metric-value">—</div></div>
-        <div class="metric"><div class="label">平均坡度 mm/m</div><div id="stabilityMean" class="metric-value">—</div></div>
-        <div class="metric"><div class="label">標準差 mm/m</div><div id="stabilityStd" class="metric-value">—</div></div>
-        <div class="metric"><div class="label">極差 mm/m</div><div id="stabilityRange" class="metric-value">—</div></div>
-        <div class="metric"><div class="label">已穩定時間</div><div id="stabilityDuration" class="metric-value">—</div></div>
-      </section>
-      <p id="stabilityReason" class="capture-note">等待量測資料</p>
-    </details>
-
-    <section class="card capture-controls" aria-label="手動拍攝">
-      <div class="label">單次量測紀錄</div>
-      <button id="captureButton" type="button" disabled>記錄並拍照</button>
-      <button id="exportPhoneLog" type="button">匯出手機端 LOG</button>
-      <div id="captureWarning" class="capture-note">等待穩定度資料</div>
-      <div id="captureStatus" class="capture-note" role="status" aria-live="polite">等待連線與手機儲存初始化</div>
-      <div class="capture-note">最近成功 record_id：<span id="lastRecordId">—</span></div>
-      <div id="phoneLogCount" class="capture-note">手機端紀錄：0 筆 · 已配對：0 筆 · 等待中：0 筆 · 失敗：0 筆</div>
-      <p class="capture-note">實驗結束請匯出手機 LOG。無痕模式、清除網站資料、更換網址或手機可能造成資料遺失。</p>
     </section>
 
     <section id="stateCard" class="card state-card searching">
@@ -440,6 +424,21 @@
         <div id="angle" class="pair-value">—</div>
       </div>
     </section>
+
+    <details class="card diagnostics" id="stabilityCard">
+      <summary><span class="summary-copy"><strong>氣泡穩定度</strong>
+        <span id="stabilityState" class="stability-label">暖機中</span></span>
+        <span class="more-button" aria-hidden="true">•••</span></summary>
+      <section class="metrics" aria-label="穩定度指標">
+        <div class="metric"><div class="label">最近樣本數</div><div id="stabilitySamples" class="metric-value">—</div></div>
+        <div class="metric"><div class="label">有效率</div><div id="stabilityRatio" class="metric-value">—</div></div>
+        <div class="metric"><div class="label">平均坡度 mm/m</div><div id="stabilityMean" class="metric-value">—</div></div>
+        <div class="metric"><div class="label">標準差 mm/m</div><div id="stabilityStd" class="metric-value">—</div></div>
+        <div class="metric"><div class="label">極差 mm/m</div><div id="stabilityRange" class="metric-value">—</div></div>
+        <div class="metric"><div class="label">已穩定時間</div><div id="stabilityDuration" class="metric-value">—</div></div>
+      </section>
+      <p id="stabilityReason" class="capture-note">等待量測資料</p>
+    </details>
 
     <details class="card diagnostics">
       <summary>
@@ -735,8 +734,7 @@
           clock_offset_ms_at_press: clockOffsetMs,
         } };
       },
-      ui: { button: $("captureButton"), export: $("exportPhoneLog"), warning: $("captureWarning"),
-        status: $("captureStatus"), count: $("phoneLogCount"), record: $("lastRecordId") },
+      ui: { button: $("captureButton"), export: $("exportPhoneLog"), count: $("phoneLogCount") },
     });
     phoneCapture.init();
     setInterval(() => phoneCapture.refreshReady(), 2000);

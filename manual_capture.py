@@ -23,6 +23,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import cv2
 
@@ -31,6 +32,7 @@ from display import annotate_capture_roi
 from stability import finite_number
 
 LOG = logging.getLogger(__name__)
+LOG_TIMEZONE = ZoneInfo("Asia/Taipei")
 PI_LOG_FIELDS = (
     "session_id sample_id record_id request_id frame_id "
     "request_received_at_iso request_received_at_epoch_ms "
@@ -60,7 +62,7 @@ SAVED_RESPONSE_FIELDS = ("status", "request_id", "session_id", "sample_id",
 
 def wall_time(epoch_ms=None):
     epoch_ms = time.time() * 1000 if epoch_ms is None else epoch_ms
-    iso = datetime.fromtimestamp(epoch_ms / 1000).astimezone().isoformat(timespec="milliseconds")
+    iso = datetime.fromtimestamp(epoch_ms / 1000, LOG_TIMEZONE).isoformat(timespec="milliseconds")
     return iso, epoch_ms
 
 
@@ -84,6 +86,7 @@ def git_value(*arguments):
 def session_metadata(session_id):
     return {
         "schema_version": 1, "session_id": session_id, "started_at_iso": wall_time()[0],
+        "log_timezone": "Asia/Taipei",
         "hostname": socket.gethostname(), "git_commit": git_value("rev-parse", "HEAD"),
         "git_branch": git_value("branch", "--show-current"), "python_version": platform.python_version(),
         "model_path": str(config.MODEL_PATH), "model_image_size": list(config.MODEL_IMAGE_SIZE),
@@ -136,7 +139,7 @@ class CaptureManager:
                  max_active=None, require_stable=None):
         self.root = Path(root) if root is not None else config.LOG_DIRECTORY / "manual_captures"
         self.root.mkdir(parents=True, exist_ok=True)
-        self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:8]
+        self.session_id = datetime.now(LOG_TIMEZONE).strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:8]
         self.session_directory = self.root / self.session_id
         self.images_directory = self.session_directory / "images"
         self.images_directory.mkdir(parents=True, exist_ok=False)
