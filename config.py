@@ -15,6 +15,25 @@ FRAME_HEIGHT = 540
 RAW_WIDTH = 2328
 RAW_HEIGHT = 1748
 
+# 20260904_001 independently validates the cleaned 20260903_004 calibration.
+# Its result directory contains validation reports, rather than another NPZ.
+CAMERA_CALIBRATION_RESULT_DIRECTORY = (
+    PROJECT_DIRECTORY
+    / "live_yolo1_app_judy_a"
+    / "camera_calibration"
+    / "snapshots"
+    / "20260904_001"
+    / "result"
+)
+CAMERA_CALIBRATION_NPZ = (
+    CAMERA_CALIBRATION_RESULT_DIRECTORY.parent.parent
+    / "20260903_004"
+    / "result"
+    / "clean"
+    / "camera_calibration_clean.npz"
+)
+UNDISTORT_ALPHA = 1.0
+
 # 740 x 160 centered ROI.
 ROI_WIDTH = 740
 ROI_HEIGHT = 160
@@ -28,14 +47,14 @@ CONFIDENCE_THRESHOLD = 0.25
 VCM_FOCUS_ABSOLUTE = 3711
 VCM_FOCUS_SETTLE_SECONDS = 0.25
 
-# Bubble position calibration. Coordinates in this JSON are relative to the
-# same 740 x 160 ROI used by the YOLO detector.
+# Tuner JSON records its image coordinate system. Rectified measurements are
+# used directly; legacy JSON without this metadata uses original ROI pixels.
 ENABLE_BUBBLE_MEASUREMENT = True
 BUBBLE_CALIBRATION_PATH = (
     PROJECT_DIRECTORY
     / "binary_stream_tuner_project"
     / "binary_captures"
-    / "binary_20260926_014128_460579_tick_measurement.json"
+    / "binary_20261002_072923_517806_tick_measurement.json"
 )
 
 # Web dashboard and WebSocket telemetry. Open http://<Pi IP>:8000 on a phone
@@ -47,9 +66,8 @@ DASHBOARD_HOST = "0.0.0.0"
 DASHBOARD_PORT = 8000
 TELEMETRY_SEND_EVERY = 1
 
-# Physical conversion retained from the Jetson Nano version. PIXELS_PER_DIV is
-# loaded from the tick calibration JSON (currently 19.0), rather than fixed at
-# the previous value of 23.
+# Physical conversion uses calibrated divisions after coordinate conversion.
+# The current rectified tick JSON records 18 pixels per division.
 MM_PER_M_PER_DIV = 0.02
 LEVEL_TOLERANCE_MM_PER_M = 0.01
 MAX_MEASURABLE_SLOPE_MM_PER_M = 0.1

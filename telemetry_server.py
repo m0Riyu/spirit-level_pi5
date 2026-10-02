@@ -28,14 +28,23 @@ def build_telemetry_payload(
     if valid:
         pixels_per_div = float(measurement.pitch_px_per_div)
         pixels_per_1_mmm = pixels_per_div / float(mm_per_m_per_div)
-        slope_mm_per_m = offset_px / pixels_per_1_mmm
+        # Rectification makes spacing nonlinear; calibrated divisions already
+        # account for that geometry and are shared with the CSV/preview.
+        slope_mm_per_m = float(measurement.offset_div) * float(mm_per_m_per_div)
         angle_degrees = math.degrees(math.atan(slope_mm_per_m / 1000.0))
-        within_official_range = abs(slope_mm_per_m) <= float(
-            max_measurable_slope_mm_per_m
+        absolute_slope = abs(slope_mm_per_m)
+        maximum_slope = float(max_measurable_slope_mm_per_m)
+        within_official_range = (
+            absolute_slope <= maximum_slope
+            or math.isclose(absolute_slope, maximum_slope, rel_tol=0, abs_tol=1e-12)
         )
         if not within_official_range:
             system_state = "OUT_OF_RANGE"
-        elif abs(slope_mm_per_m) <= float(level_tolerance_mm_per_m):
+        elif (
+            absolute_slope <= float(level_tolerance_mm_per_m)
+            or math.isclose(absolute_slope, float(level_tolerance_mm_per_m),
+                            rel_tol=0, abs_tol=1e-12)
+        ):
             system_state = "LEVEL"
         else:
             system_state = "ADJUST"

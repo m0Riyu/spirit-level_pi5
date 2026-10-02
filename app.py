@@ -64,20 +64,6 @@ def run():
     calibration = None
     telemetry = None
 
-    if config.ENABLE_BUBBLE_MEASUREMENT:
-        try:
-            calibration = BubbleCalibration.from_json(
-                config.BUBBLE_CALIBRATION_PATH,
-                expected_size=(config.ROI_WIDTH, config.ROI_HEIGHT),
-            )
-            print(
-                "氣泡量測校正已載入："
-                f"center={calibration.center_x_roi:.3f}px, "
-                f"pitch={calibration.pitch_px_per_div:.3f}px/div"
-            )
-        except (OSError, KeyError, TypeError, ValueError) as error:
-            print(f"警告：無法載入氣泡量測校正，僅執行YOLO：{error}")
-
     if config.ENABLE_WEBSOCKET:
         try:
             telemetry = TelemetryServer(
@@ -100,6 +86,21 @@ def run():
     try:
         camera = create_camera()
         print("相機已啟動。")
+        if config.ENABLE_BUBBLE_MEASUREMENT:
+            try:
+                calibration = BubbleCalibration.from_json(
+                    config.BUBBLE_CALIBRATION_PATH,
+                    expected_size=(config.ROI_WIDTH, config.ROI_HEIGHT),
+                    undistorter=camera.frame_undistorter,
+                    roi_origin=(config.ROI_X1, config.ROI_Y1),
+                )
+                print(
+                    "氣泡量測校正（去畸變座標）已載入："
+                    f"center={calibration.center_x_roi:.3f}px, "
+                    f"center pitch={calibration.pitch_px_per_div:.3f}px/div"
+                )
+            except (OSError, KeyError, TypeError, ValueError) as error:
+                print(f"警告：無法載入氣泡量測校正，僅執行YOLO：{error}")
         print("按q或Ctrl+C結束。")
 
         frame_id = 0
@@ -125,7 +126,10 @@ def run():
                 measurement = calibration.measure(
                     prediction.detection.center_x_roi
                     if prediction.detection.detected
-                    else None
+                    else None,
+                    prediction.detection.center_y_roi
+                    if prediction.detection.detected
+                    else None,
                 )
 
             annotated_frame = None

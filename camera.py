@@ -9,6 +9,7 @@ from picamera2 import Picamera2
 from libcamera import controls
 
 import config
+from camera_undistortion import FullFrameUndistorter, load_calibration
 
 
 def find_vcm_device():
@@ -96,6 +97,11 @@ def create_camera(initial_controls=None):
 
 
 def start_camera(camera, initial_controls):
+    image_size = (config.FRAME_WIDTH, config.FRAME_HEIGHT)
+    matrix, distortion = load_calibration(config.CAMERA_CALIBRATION_NPZ, image_size)
+    camera.frame_undistorter = FullFrameUndistorter(
+        matrix, distortion, image_size, alpha=config.UNDISTORT_ALPHA,
+    )
     camera_config = camera.create_preview_configuration(
         main={
             "size": (config.FRAME_WIDTH, config.FRAME_HEIGHT),
@@ -129,12 +135,13 @@ def start_camera(camera, initial_controls):
     while time.monotonic() < deadline:
         camera.capture_array("main")
     print(f"VCM device：{device}；focus_absolute requested/actual：{requested}/{actual}")
+    print(f"全畫面去畸變已啟用：{config.CAMERA_CALIBRATION_NPZ}")
     return camera
 
 
 def capture_roi(camera):
-    """Capture a full frame and return it together with the centered ROI."""
-    frame = camera.capture_array("main")
+    """Rectify the full frame BEFORE cropping the ROI used by all consumers."""
+    frame = camera.frame_undistorter.process(camera.capture_array("main"))
     roi = frame[
         config.ROI_Y1 : config.ROI_Y2,
         config.ROI_X1 : config.ROI_X2,

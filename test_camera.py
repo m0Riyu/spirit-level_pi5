@@ -5,8 +5,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import cv2
+import numpy as np
+
 import camera
 import config
+from camera_undistortion import FullFrameUndistorter
 
 
 FOCUS_CONTROLS = (
@@ -74,6 +78,8 @@ class CameraStartupTests(unittest.TestCase):
             return 3711, 3711
 
         with (
+            patch.object(camera, "load_calibration", return_value=(np.eye(3), np.zeros(5))),
+            patch.object(camera, "FullFrameUndistorter"),
             patch.object(camera, "Picamera2", return_value=instance),
             patch.object(camera, "find_vcm_device", return_value=Path("/dev/v4l-subdev3")),
             patch.object(camera, "query_focus_control", return_value=(0, 4095, 1, 0, 0)),
@@ -100,6 +106,8 @@ class CameraStartupTests(unittest.TestCase):
         instance = Mock()
         instance.camera_controls = {}
         with (
+            patch.object(camera, "load_calibration", return_value=(np.eye(3), np.zeros(5))),
+            patch.object(camera, "FullFrameUndistorter"),
             patch.object(camera, "Picamera2", return_value=instance),
             patch.object(camera, "find_vcm_device", side_effect=RuntimeError("no VCM")),
         ):
@@ -107,6 +115,38 @@ class CameraStartupTests(unittest.TestCase):
                 camera.create_camera()
         instance.start.assert_called_once_with()
         instance.close.assert_called_once_with()
+
+    def test_invalid_calibration_closes_camera_before_starting(self):
+        instance = Mock()
+        with (
+            patch.object(camera, "Picamera2", return_value=instance),
+            patch.object(camera, "load_calibration", side_effect=ValueError("wrong calibration size")),
+        ):
+            with self.assertRaisesRegex(ValueError, "wrong calibration size"):
+                camera.create_camera()
+        instance.start.assert_not_called()
+        instance.close.assert_called_once_with()
+
+    def test_rectifies_full_frame_before_cropping_and_reuses_maps(self):
+        matrix = np.array([[760., 0, 480], [0, 760., 270], [0, 0, 1]])
+        distortion = np.array([.14, -.78, .001, .0008, 1.01])
+        frame = np.random.default_rng(10).integers(0, 256, (540, 960, 3), dtype=np.uint8)
+        undistorter = FullFrameUndistorter(matrix, distortion, (960, 540))
+        instance = Mock(frame_undistorter=undistorter)
+        instance.capture_array.return_value = frame
+        expected = cv2.undistort(frame, matrix, distortion, None, undistorter.camera_matrix)
+        with patch("camera_undistortion.cv2.initUndistortRectifyMap") as create_maps:
+            for _ in range(2):
+                corrected, roi = camera.capture_roi(instance)
+                self.assertEqual(corrected.shape, (540, 960, 3))
+                self.assertEqual(roi.shape, (160, 740, 3))
+                # Float maps and undistort's fixed-point maps can round
+                # interpolation differently on this high-frequency image.
+                self.assertLess(np.abs(corrected.astype(float) - expected.astype(float)).mean(), 1.0)
+                np.testing.assert_array_equal(roi, corrected[190:350, 110:850])
+                self.assertFalse(np.shares_memory(roi, corrected))
+            create_maps.assert_not_called()
+        self.assertGreater(np.abs(corrected.astype(float) - frame.astype(float)).mean(), 1)
 
 
 if __name__ == "__main__":

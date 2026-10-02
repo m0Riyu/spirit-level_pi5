@@ -1,5 +1,7 @@
 # 相機刻度量測系統
 
+目前版本：[第一版 B版](VERSION.md)，Git 標記 `v1-b`。
+
 ## YOLO 氣泡位置量測
 
 執行：
@@ -18,20 +20,43 @@ V4L2 `focus_absolute` 控制方式。`config.py` 預設為
 需要系統已安裝 `v4l2-ctl`（Debian/Raspberry Pi OS 的 `v4l-utils`）。
 啟動時終端會顯示設定值與實際值，設定失敗會停止啟動並釋放相機。
 
-程式使用刻度校正 JSON 中的：
+`main.py` 的影像流程為：
 
-- `reference_midpoint_x = 373.0 px` 作為刻度零點。
-- `global_pitch.pitch_px = 19.0 px/div` 作為每格像素數。
+```text
+960 × 540 相機影像 → 全畫面去畸變 → 中央 740 × 160 ROI
+→ YOLO → 氣泡量測 → 本機預覽／CSV／WebSocket
+```
 
-YOLO 偵測到氣泡後，位置計算為：
+去畸變使用
+`/home/user/my_project/live_yolo1_app_judy_a/camera_calibration/snapshots/20260904_001/result`
+驗證報告中的同一組 K、D。該目錄只有驗證結果，實際 NPZ 是報告引用的
+`../20260903_004/result/clean/camera_calibration_clean.npz`（相對於
+`snapshots/20260904_001`）。路徑由 `config.py` 的 `CAMERA_CALIBRATION_NPZ`
+設定；`UNDISTORT_ALPHA = 1.0` 保留完整輸出尺寸與邊緣黑區，不採用
+OpenCV 回傳的裁切區。ROI 在去畸變後才擷取，後續影像座標皆為去畸變座標。
+映射表只在相機啟動時建立，逐幀使用 `remap`；校正檔缺失、無效或與
+960 × 540 尺寸不符時，會停止啟動並釋放相機。
+
+刻度校正 JSON 的 `reference_midpoint_x` 是刻度零點，
+`global_pitch.pitch_px` 是每格像素數。程式會辨識座標系：
+
+- 新刻度量測程式輸出的 `image_geometry.coordinate_system = "undistorted"`
+  已是去畸變 ROI 座標。主程式確認 K、D、新 K、畫面尺寸及 ROI 原點一致後，
+  直接使用校正檔中的零點與間距。目前設定為 **18.0 px/div**。
+- 舊 JSON 未記錄 `image_geometry` 時，按原始 ROI 座標處理：使用 `axis_y`
+  轉換零點與中心附近間距，格數則將偵測中心反向映射至原始校正座標計算。
+
+使用去畸變後的刻度校正檔時：
 
 ```text
 bubble_offset_px  = bubble_center_x_roi - scale_center_x_roi
-bubble_offset_div = bubble_offset_px / pitch_px_per_div
+bubble_offset_div = bubble_offset_px / global_pitch.pitch_px
 ```
 
 結果為正表示氣泡在刻度中心右側，負值表示在左側。終端、預覽畫面及
-CSV 都會輸出偏移像素與偏移格數。校正檔不存在或 ROI 尺寸不相符時，
+CSV 都會輸出去畸變座標中的偏移像素與校正格數；校正 JSON 保留不改。
+使用舊原始座標校正檔時，`pitch_px_per_div` 表示零點附近的間距，格數以
+原始校正座標換算。刻度校正檔不存在、舊檔缺少 `axis_y`，或影像幾何不符時，
 程式會保留原本的相機與 YOLO 功能，並將量測標記為不可用。
 
 ## 手機 WebSocket 接收畫面
@@ -57,13 +82,10 @@ WebSocket 位址為 `ws://<Pi IP>:8765`。傳輸採用 JSON schema version 1；
 「數據延遲」是推論完成至手機收到的端到端時間，「系統總延遲」是
 影像擷取完成至手機收到資料的端到端時間。
 
-坡度換算沿用 Jetson Nano 公式，但 `PIXELS_PER_DIV` 改由刻度校正 JSON
-自動載入：
+坡度由完成座標轉換的偏移格數換算，與本機量測及 CSV 一致：
 
 ```text
-PIXELS_PER_DIV = global_pitch.pitch_px = 19.0
-PIXELS_PER_1_MMM = PIXELS_PER_DIV / 0.02 = 950
-slope_mm_per_m = bubble_offset_px / PIXELS_PER_1_MMM
+slope_mm_per_m = bubble_offset_div * 0.02
 angle_degrees = atan(slope_mm_per_m / 1000)
 ```
 

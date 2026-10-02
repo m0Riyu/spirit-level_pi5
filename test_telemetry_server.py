@@ -72,6 +72,21 @@ class TelemetryPayloadTests(unittest.TestCase):
         self.measurement.offset_div = 5.0 / 19.0
         self.assertEqual(self.build()["system_state"], "LEVEL")
 
+    def test_rectified_divisions_determine_slope_instead_of_nominal_pixel_pitch(self):
+        self.measurement.offset_div = 2.0
+        self.measurement.offset_px = 30.0
+        self.measurement.pitch_px_per_div = 18.9
+        measurement = self.build()["measurement"]
+        self.assertAlmostEqual(measurement["slope_mm_per_m"], 0.04)
+        self.assertEqual(measurement["offset_px"], 30.0)
+        self.assertEqual(measurement["offset_div"], 2.0)
+
+    def test_geometry_roundoff_preserves_inclusive_boundaries(self):
+        for divisions, state in ((-5., "ADJUST"), (-.5, "LEVEL"), (.5, "LEVEL"), (5., "ADJUST")):
+            with self.subTest(divisions=divisions):
+                self.measurement.offset_div = divisions * (1 + 1e-12)
+                self.assertEqual(self.build()["system_state"], state)
+
     def test_positive_boundary_is_level(self):
         self.measurement.offset_px = 9.5
         self.measurement.offset_div = 0.5
@@ -215,7 +230,7 @@ class DashboardLayoutTests(unittest.TestCase):
         self.assertIn('OUT_OF_RANGE: "超出範圍"', html)
         self.assertIn("function showOutOfRange(measurement)", html)
         self.assertIn('ui.bubble.style.left = isLeft ? "5%" : "95%"', html)
-        self.assertIn('`${isLeft ? "偏左" : "偏右"} · 超出範圍`', html)
+        self.assertIn('ui.divisions.textContent = `超出範圍`;', html)
         self.assertIn(
             "measurement.valid && measurement.within_official_range", html
         )

@@ -1,0 +1,38 @@
+INDEPENDENT CALIBRATION VALIDATION
+========================================================================
+Calibration Session     : 20260903_004
+Validation Session      : 20260904_001
+
+Calibration Clean RMS   : 0.365342px
+
+Fixed K:
+[[763.817549206   0.          480.598594677]
+ [  0.          763.825461331 274.759833818]
+ [  0.            0.            1.         ]]
+
+Fixed D:
+[[ 1.419910443e-01 -7.868619401e-01  1.120883152e-03  7.816218811e-04
+   1.014461230e+00]]
+
+Validation images       : 17
+Validation coverage     : 100.00%
+
+Mean RMSE               : 0.420086px
+Median RMSE             : 0.412736px
+Best RMSE               : 0.321096px
+Worst RMSE              : 0.542021px
+All-point RMSE          : 0.424507px
+
+Views <= 0.50px         : 16/17 (94.1%)
+
+Horizontal RMSE:
+LEFT   : 0.383025px
+CENTER : 0.441878px
+RIGHT  : 0.427974px
+
+Acceptance:
+Median <=0.50px : PASS
+>=80% <=0.50px  : PASS
+Worst <=0.70px  : PASS
+
+OVERALL STATUS : PASS
