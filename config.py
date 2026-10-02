@@ -64,16 +64,31 @@ WEBSOCKET_HOST = "0.0.0.0"
 WEBSOCKET_PORT = 8765
 DASHBOARD_HOST = "0.0.0.0"
 DASHBOARD_PORT = 8000
-TELEMETRY_SEND_EVERY = 1
+TELEMETRY_SEND_EVERY = 2  # About 5 Hz at 10 inference FPS; YOLO still runs every frame.
 
 # Physical conversion uses calibrated divisions after coordinate conversion.
 # The current rectified tick JSON records 18 pixels per division.
 MM_PER_M_PER_DIV = 0.02
 LEVEL_TOLERANCE_MM_PER_M = 0.01
-MAX_MEASURABLE_SLOPE_MM_PER_M = 0.1
+MAX_MEASURABLE_SLOPE_MM_PER_M = 0.12
 
-# 影像串流開關：True 顯示即時預覽；False 僅執行推論、輸出數值及 CSV。
-ENABLE_IMAGE_STREAM = True
+# This legacy name controls ONLY the Pi's local cv2.imshow() preview.
+# WebSocket always carries numeric JSON, never images/JPEG/base64.
+ENABLE_IMAGE_STREAM = False
+ENABLE_CONTINUOUS_CSV = False  # Legacy .csv.part / Y/N prompt only when True.
+
+# Engineering starting values, not scientifically validated thresholds.
+STABILITY_WINDOW_SIZE = 20
+STABILITY_MIN_VALID_RATIO = 0.90
+STABILITY_MAX_STD_MM_PER_M = 0.002
+STABILITY_MAX_RANGE_MM_PER_M = 0.006
+STABILITY_HOLD_SECONDS = 1.5
+REQUIRE_STABLE_FOR_CAPTURE = False
+
+JPEG_QUALITY = 95
+CAPTURE_REQUEST_QUEUE_SIZE = 4
+CAPTURE_WRITER_QUEUE_SIZE = 4
+CAPTURE_MAX_ACTIVE_REQUESTS = 4
 PRINT_EVERY = 10
 FLUSH_EVERY = 50
 

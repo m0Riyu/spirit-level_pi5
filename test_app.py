@@ -56,6 +56,7 @@ class MainUndistortionTests(unittest.TestCase):
                 patch.object(config, "ENABLE_BUBBLE_MEASUREMENT", True),
                 patch.object(config, "ENABLE_WEBSOCKET", True),
                 patch.object(config, "ENABLE_IMAGE_STREAM", True),
+                patch.object(config, "ENABLE_CONTINUOUS_CSV", True),
                 patch.object(config, "TELEMETRY_SEND_EVERY", 1),
                 patch.object(app, "YoloDetector", return_value=detector),
                 patch.object(app, "create_camera", return_value=camera),

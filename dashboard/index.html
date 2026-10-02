@@ -344,6 +344,19 @@
       overflow-wrap: anywhere;
     }
 
+    .capture-controls { padding: 20px; }
+    .capture-controls button {
+      padding: 12px 18px; margin: 8px 6px 8px 0; border-radius: 12px;
+      border: 1px solid var(--mint); background: #123d30; color: #ecfff7;
+      font: inherit; font-weight: 700; cursor: pointer;
+    }
+    .capture-controls button:disabled { opacity: .4; cursor: wait; }
+    .capture-note { color: var(--muted); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+    .stability-label { color: #e9ce70; }
+    .stability-label.stable { color: var(--mint); }
+    .stability-label.unstable { color: #ffab70; }
+    .stability-label.no_measurement { color: #acb8b3; }
+
     @media (max-width: 390px) {
       .shell { padding-left: 12px; padding-right: 12px; }
       header { gap: 8px; }
@@ -379,6 +392,32 @@
         <div class="detail"><span>FPS</span><strong id="fps">—</strong></div>
         <div class="detail"><span>Frame</span><strong id="frameId">—</strong></div>
       </div>
+    </section>
+
+    <details class="card diagnostics" id="stabilityCard">
+      <summary><span class="summary-copy"><strong>氣泡穩定度</strong>
+        <span id="stabilityState" class="stability-label">暖機中</span></span>
+        <span class="more-button" aria-hidden="true">•••</span></summary>
+      <section class="metrics" aria-label="穩定度指標">
+        <div class="metric"><div class="label">最近樣本數</div><div id="stabilitySamples" class="metric-value">—</div></div>
+        <div class="metric"><div class="label">有效率</div><div id="stabilityRatio" class="metric-value">—</div></div>
+        <div class="metric"><div class="label">平均坡度 mm/m</div><div id="stabilityMean" class="metric-value">—</div></div>
+        <div class="metric"><div class="label">標準差 mm/m</div><div id="stabilityStd" class="metric-value">—</div></div>
+        <div class="metric"><div class="label">極差 mm/m</div><div id="stabilityRange" class="metric-value">—</div></div>
+        <div class="metric"><div class="label">已穩定時間</div><div id="stabilityDuration" class="metric-value">—</div></div>
+      </section>
+      <p id="stabilityReason" class="capture-note">等待量測資料</p>
+    </details>
+
+    <section class="card capture-controls" aria-label="手動拍攝">
+      <div class="label">單次量測紀錄</div>
+      <button id="captureButton" type="button" disabled>記錄並拍照</button>
+      <button id="exportPhoneLog" type="button">匯出手機端 LOG</button>
+      <div id="captureWarning" class="capture-note">等待穩定度資料</div>
+      <div id="captureStatus" class="capture-note" role="status" aria-live="polite">等待連線與手機儲存初始化</div>
+      <div class="capture-note">最近成功 record_id：<span id="lastRecordId">—</span></div>
+      <div id="phoneLogCount" class="capture-note">手機端紀錄：0 筆 · 已配對：0 筆 · 等待中：0 筆 · 失敗：0 筆</div>
+      <p class="capture-note">實驗結束請匯出手機 LOG。無痕模式、清除網站資料、更換網址或手機可能造成資料遺失。</p>
     </section>
 
     <section id="stateCard" class="card state-card searching">
@@ -440,6 +479,7 @@
     </footer>
   </main>
 
+  <script src="capture-log.js"></script>
   <script>
     const $ = (id) => document.getElementById(id);
     const ui = {
@@ -468,6 +508,8 @@
     let inferenceSamples = [];
     let totalLatencySamples = [];
     let performanceWindowStartedAt = performance.now();
+    let latestTelemetrySummary = null;
+    let stabilityStable = false;
 
     const RATE_WINDOW_MS = 3000;
     const FRAME_SAMPLE_COUNT = 30;
@@ -480,6 +522,7 @@
     };
 
     function pushSample(samples, value, maximumLength) {
+      if (value === null || value === undefined) return;
       const numeric = Number(value);
       if (!Number.isFinite(numeric)) return;
       samples.push(numeric);
@@ -546,7 +589,7 @@
       ui.bubble.classList.remove("out-of-range");
     }
 
-    function updatePerformanceMetrics() {
+    function numericPerformanceMetrics() {
       const now = performance.now();
       const cutoff = now - RATE_WINDOW_MS;
       messageTimes = messageTimes.filter((value) => value >= cutoff);
@@ -555,11 +598,13 @@
         Math.max(1000, now - performanceWindowStartedAt)
       );
       const rate = messageTimes.length / (observedMs / 1000);
-      ui.rate.textContent = `${rate.toFixed(rate >= 10 ? 0 : 1)} 筆/秒`;
+      return { rate, latency: median(latencySamples), inference: median(inferenceSamples),
+        totalLatency: median(totalLatencySamples) };
+    }
 
-      const latency = median(latencySamples);
-      const inference = median(inferenceSamples);
-      const totalLatency = median(totalLatencySamples);
+    function updatePerformanceMetrics() {
+      const { rate, latency, inference, totalLatency } = numericPerformanceMetrics();
+      ui.rate.textContent = `${rate.toFixed(rate >= 10 ? 0 : 1)} 筆/秒`;
       ui.latency.textContent = number(latency, 1, "ms");
       ui.inference.textContent = number(inference, 1, "ms");
       ui.totalLatency.textContent = number(totalLatency, 1, "ms");
@@ -580,6 +625,26 @@
     function renderTelemetry(data) {
       lastTelemetryAt = Date.now();
       messageTimes.push(performance.now());
+      if (messageTimes.length > 300) messageTimes.shift();
+      latestTelemetrySummary = { frame_id: data.frame_id, sent_at_epoch_ms: data.sent_at_epoch_ms,
+        received_at_epoch_ms: lastTelemetryAt };
+      const stability = data.stability || {};
+      stabilityStable = stability.stable === true;
+      const stabilityLabels = { STABLE: "穩定", UNSTABLE: "不穩定", WARMING_UP: "暖機中", NO_MEASUREMENT: "無有效量測" };
+      $("stabilityState").textContent = stabilityLabels[stability.state] || "無有效量測";
+      $("stabilityState").className = "stability-label " + (stability.state || "NO_MEASUREMENT").toLowerCase();
+      $("stabilitySamples").textContent = `${stability.valid_count ?? 0} / ${stability.sample_count ?? 0}`;
+      $("stabilityRatio").textContent = number(stability.valid_ratio == null ? null : stability.valid_ratio * 100, 1, "%");
+      $("stabilityMean").textContent = number(stability.mean_slope_mm_per_m, 5, "", true);
+      $("stabilityStd").textContent = number(stability.std_slope_mm_per_m, 5, "");
+      $("stabilityRange").textContent = number(stability.range_slope_mm_per_m, 5, "");
+      $("stabilityDuration").textContent = number(stability.stable_duration_seconds, 1, "秒");
+      const reasons = { current_invalid: "目前沒有有效量測", valid_ratio_low: "最近視窗有效率不足",
+        insufficient_samples: "有效樣本仍不足", std_exceeds_threshold: "標準差超過門檻",
+        range_exceeds_threshold: "極差超過門檻", hold_time_pending: "數值波動符合門檻，正在累積持續時間",
+        thresholds_held: "數值波動及持續時間均符合門檻" };
+      $("stabilityReason").textContent = reasons[stability.reason] || "等待量測資料";
+      phoneCapture.updateButton();
 
       const performanceData = data.performance || {};
       const measurement = data.measurement || {};
@@ -656,10 +721,33 @@
       socket.addEventListener("error", () => socket.close());
     }
 
+    const phoneCapture = new CaptureLog.PhoneCaptureController({
+      snapshot: () => {
+        const metrics = numericPerformanceMetrics();
+        const online = socket?.readyState === WebSocket.OPEN && lastTelemetryAt > 0 && Date.now() - lastTelemetryAt <= 2500;
+        return { online, stable: online && stabilityStable, fields: {
+          connection_state_at_press: online ? "connected" : "disconnected", websocket_url: websocketUrl,
+          latest_telemetry_frame_id_at_press: latestTelemetrySummary?.frame_id ?? null,
+          latest_telemetry_sent_at_epoch_ms: latestTelemetrySummary?.sent_at_epoch_ms ?? null,
+          latest_telemetry_received_at_epoch_ms: latestTelemetrySummary?.received_at_epoch_ms ?? null,
+          message_rate_hz_at_press: metrics.rate, data_latency_median_ms_at_press: metrics.latency,
+          total_latency_median_ms_at_press: metrics.totalLatency, inference_median_ms_at_press: metrics.inference,
+          clock_offset_ms_at_press: clockOffsetMs,
+        } };
+      },
+      ui: { button: $("captureButton"), export: $("exportPhoneLog"), warning: $("captureWarning"),
+        status: $("captureStatus"), count: $("phoneLogCount"), record: $("lastRecordId") },
+    });
+    phoneCapture.init();
+    setInterval(() => phoneCapture.refreshReady(), 2000);
+
     setInterval(() => {
       if (lastTelemetryAt && Date.now() - lastTelemetryAt > 2500) {
         clearMeasurements("NO SIGNAL");
+        $("stabilityState").textContent = "無有效量測";
+        $("stabilityState").className = "stability-label no_measurement";
       }
+      phoneCapture.updateButton();
     }, 250);
 
     setInterval(updatePerformanceMetrics, 500);

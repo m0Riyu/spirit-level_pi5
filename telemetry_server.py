@@ -10,6 +10,9 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from manual_capture import valid_request_id
+from stability import finite_number
+
 
 def build_telemetry_payload(
     frame_id,
@@ -22,7 +25,12 @@ def build_telemetry_payload(
     max_measurable_slope_mm_per_m,
 ):
     """Build the versioned JSON message sent to dashboard clients."""
-    valid = bool(detection.detected and measurement.valid)
+    valid = bool(detection.detected and measurement.valid and all(
+        finite_number(value) is not None for value in (
+            measurement.offset_px, measurement.offset_div, measurement.center_x_roi,
+            measurement.scale_center_x_roi, measurement.pitch_px_per_div, detection.confidence,
+        )
+    ) and finite_number(measurement.pitch_px_per_div) > 0)
     offset_px = float(measurement.offset_px) if valid else None
 
     if valid:
@@ -64,21 +72,21 @@ def build_telemetry_payload(
         "system_state": system_state,
         "detected": bool(detection.detected),
         "detection_count": int(detection.detection_count),
-        "confidence": float(detection.confidence) if detection.detected else None,
+        "confidence": finite_number(detection.confidence) if detection.detected else None,
         "measurement": {
             "valid": valid,
             "within_official_range": within_official_range,
-            "error": measurement.error,
+            "error": measurement.error or ("nonfinite_measurement" if measurement.valid and not valid else ""),
             "bubble_center_x_roi": (
                 float(measurement.center_x_roi) if valid else None
             ),
             "scale_center_x_roi": (
-                float(measurement.scale_center_x_roi)
+                finite_number(measurement.scale_center_x_roi)
                 if measurement.scale_center_x_roi not in (None, "")
                 else None
             ),
             "pitch_px_per_div": (
-                float(measurement.pitch_px_per_div)
+                finite_number(measurement.pitch_px_per_div)
                 if measurement.pitch_px_per_div not in (None, "")
                 else None
             ),
@@ -100,7 +108,75 @@ def build_telemetry_payload(
 
 
 class _NoCacheRequestHandler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, capture_manager=None, **kwargs):
+        self.capture_manager = capture_manager
+        super().__init__(*args, **kwargs)
+
+    def _json(self, status, payload):
+        body = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        if self.path.split("?", 1)[0] != "/api/captures":
+            self._json(404, {"status": "error", "error_code": "NOT_FOUND", "message": "API not found"})
+            return
+        # Same-origin browser API. A foreign Origin cannot enqueue work.
+        origin = self.headers.get("Origin")
+        if origin and origin.rstrip("/") != f"http://{self.headers.get('Host')}":
+            self._json(403, {"status": "error", "error_code": "INVALID_ORIGIN", "message": "same-origin request required"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 1024:
+                raise ValueError("JSON body must be between 1 and 1024 bytes")
+            self.connection.settimeout(5)
+            payload = json.loads(self.rfile.read(length))
+            if not isinstance(payload, dict) or set(payload) != {"request_id"}:
+                raise ValueError("send only request_id")
+        except (ValueError, UnicodeError, OSError) as error:
+            self._json(400, {"status": "error", "error_code": "INVALID_JSON", "message": str(error)})
+            return
+        if not valid_request_id(payload["request_id"]):
+            self._json(400, {"status": "error", "error_code": "INVALID_REQUEST_ID", "message": "request_id must be a UUID"})
+            return
+        if self.capture_manager is None:
+            self._json(503, {"status": "error", "error_code": "SERVER_NOT_READY", "message": "capture service unavailable"})
+            return
+        try:
+            status, response = self.capture_manager.submit(payload["request_id"])
+            self._json(status, response)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception("Capture API submit failed")
+            self._json(503, {"status": "error", "error_code": "STATUS_STORE_UNAVAILABLE", "message": "capture status storage unavailable"})
+
     def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        if path == "/api/captures/ready":
+            self._json(200, {"ready": self.capture_manager is not None and self.capture_manager.ready,
+                             "require_stable_for_capture": bool(self.capture_manager and self.capture_manager.require_stable)})
+            return
+        if path.startswith("/api/captures/"):
+            request_id = path[len("/api/captures/"):]
+            if not valid_request_id(request_id):
+                self._json(400, {"status": "error", "error_code": "INVALID_REQUEST_ID", "message": "request_id must be a UUID"})
+            elif self.capture_manager is None:
+                self._json(503, {"status": "error", "error_code": "SERVER_NOT_READY", "message": "capture service unavailable"})
+            else:
+                try:
+                    response = self.capture_manager.get_status(request_id)
+                    if response is None:
+                        self._json(404, {"status": "error", "request_id": request_id,
+                                         "error_code": "REQUEST_NOT_FOUND", "message": "request not found"})
+                    else:
+                        self._json(200, response)
+                except Exception:
+                    self._json(503, {"status": "error", "error_code": "STATUS_STORE_UNAVAILABLE", "message": "capture status storage unavailable"})
+            return
         if self.path.split("?", 1)[0] == "/time":
             body = json.dumps(
                 {"server_time_epoch_ms": time.time() * 1000.0},
@@ -134,12 +210,14 @@ class TelemetryServer:
         dashboard_host,
         dashboard_port,
         dashboard_directory,
+        capture_manager=None,
     ):
         self.websocket_host = websocket_host
         self.websocket_port = int(websocket_port)
         self.dashboard_host = dashboard_host
         self.dashboard_port = int(dashboard_port)
         self.dashboard_directory = Path(dashboard_directory)
+        self.capture_manager = capture_manager
 
         self._clients = set()
         self._loop = None
@@ -160,6 +238,7 @@ class TelemetryServer:
         handler = partial(
             _NoCacheRequestHandler,
             directory=str(self.dashboard_directory),
+            capture_manager=self.capture_manager,
         )
         self._http_server = ThreadingHTTPServer(
             (self.dashboard_host, self.dashboard_port), handler
