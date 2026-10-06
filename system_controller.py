@@ -108,14 +108,25 @@ class SystemController:
         self.stop_requested = threading.Event()
         self.camera_closed = threading.Event()
         self.response_sent = threading.Event()
+        self.command_done = threading.Event()
         self.action = None
         self._lock = threading.Lock()
 
     def _later(self, argv):
         def run():
-            time.sleep(self.command_delay)
-            self.run_command(argv)
+            try:
+                time.sleep(self.command_delay)
+                self.run_command(argv)
+            finally:
+                self.command_done.set()
         threading.Thread(target=run, name="system-command", daemon=True).start()
+
+    def wait_for_power_command(self, timeout=40):
+        """Main thread, end of shutdown: keep the process (and its systemd cgroup)
+        alive until poweroff/reboot has been handed to systemd. Not for
+        restart-service, whose systemctl call itself waits for this process."""
+        if self.action in ("reboot", "shutdown"):
+            self.command_done.wait(timeout)
 
     def request(self, action):
         """Returns (status, body, after_response) for the HTTP route."""

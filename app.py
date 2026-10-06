@@ -212,4 +212,5 @@ def run():
             logger.discard()
             print("已放棄此次CSV紀錄。")
 
+        controller.wait_for_power_command()
         print("程式已結束。")

@@ -94,6 +94,21 @@ class SafeShutdownTests(unittest.TestCase):
                                  "loop stopped, camera closed", "response sent", "/usr/bin/systemctl poweroff"])
         self.assertEqual(controller.request("reboot")[1]["error_code"], "BUSY")
 
+    def test_process_waits_until_the_power_command_ran(self):
+        ran = threading.Event()
+        controller = SystemController(FakeCaptures([]), run_command=lambda argv: (time.sleep(.3), ran.set()),
+                                      command_delay=0)
+        controller.camera_closed.set()
+        status, body, after = controller.request("reboot")
+        after()
+        controller.wait_for_power_command(timeout=5)
+        self.assertTrue(ran.is_set())
+        restart = SystemController(Mock(), run_command=lambda argv: None)
+        restart.request("restart-service")
+        started = time.monotonic()
+        restart.wait_for_power_command(timeout=5)  # never waits on its own restart
+        self.assertLess(time.monotonic() - started, .1)
+
     def test_restart_service_runs_after_the_response(self):
         calls = []
         controller = SystemController(Mock(), run_command=calls.append, command_delay=0)
