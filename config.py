@@ -57,13 +57,13 @@ BUBBLE_CALIBRATION_PATH = (
     / "binary_20261002_072923_517806_tick_measurement.json"
 )
 
-# Web dashboard and WebSocket telemetry. Open http://<Pi IP>:8000 on a phone
-# connected to the same network. The WebSocket endpoint is ws://<Pi IP>:8765.
+# Web dashboard and WebSocket telemetry. Open http://<Pi IP>:8100 on a phone
+# connected to the same network. The WebSocket endpoint is ws://<Pi IP>:8865.
 ENABLE_WEBSOCKET = True
 WEBSOCKET_HOST = "0.0.0.0"
-WEBSOCKET_PORT = 8765
+WEBSOCKET_PORT = 8865
 DASHBOARD_HOST = "0.0.0.0"
-DASHBOARD_PORT = 8000
+DASHBOARD_PORT = 8100
 TELEMETRY_SEND_EVERY = 2  # About 5 Hz at 10 inference FPS; YOLO still runs every frame.
 
 # Physical conversion uses calibrated divisions after coordinate conversion.

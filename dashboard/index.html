@@ -492,7 +492,7 @@
     };
 
     const params = new URLSearchParams(location.search);
-    const websocketPort = params.get("wsPort") || "8765";
+    const websocketPort = params.get("wsPort") || "8865";
     const websocketHost = params.get("wsHost") || location.hostname || "127.0.0.1";
     const websocketProtocol = location.protocol === "https:" ? "wss" : "ws";
     const websocketUrl = `${websocketProtocol}://${websocketHost}:${websocketPort}`;
