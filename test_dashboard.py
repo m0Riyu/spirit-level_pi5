@@ -285,6 +285,29 @@ BROWSER_SCENARIOS = r"""
   const rollback = history.querySelector("button");
   rollback.click();
   assert(rollback.textContent.includes("再按一次"), "rollback needs a second press");
+  // ② alignment page.
+  const alignSample = { type: "align", pose_count: 4, tag_count: 4, window_full: true, baseline_version: "a1_alignment",
+    angles: { frames: 10, pitch_deg: 10.3, yaw_deg: 19.95, roll_deg: 179.5, pitch_deg_std: .004, yaw_deg_std: .006 },
+    delta: { pitch_deg: .3, yaw_deg: -.05, roll_deg: .12 }, model_ready: true, tolerance_deg: .1,
+    hold_seconds_required: 3, in_range_seconds: 0, can_complete: false, entered_range: false, teaching: {}, collecting: [],
+    guidance: { within_tolerance: false, screws: [{ screw: "A", ok: false, label: "逆時針 約 1/4 圈" }, { screw: "B", ok: true, label: "✓" }] } };
+  location.hash = "#/align";
+  await eventually(() => !document.getElementById("viewAlign").hidden);
+  renderAlign(alignSample);
+  assert(document.querySelector("#alignPitch strong").textContent === "+0.300 °" &&
+    document.getElementById("alignPitch").classList.contains("bad") &&
+    document.getElementById("alignYaw").classList.contains("ok"), "large deltas colored against the tolerance");
+  assert(document.getElementById("alignScrews").textContent.includes("螺絲 A　逆時針 約 1/4 圈") &&
+    document.querySelector("#alignScrews .ok").textContent.includes("✓"), "screw guidance rows");
+  assert(document.getElementById("alignRoll").textContent.includes("機構無法調整") && document.getElementById("alignComplete").disabled,
+    "roll for reference; complete waits for the hold time");
+  renderAlign({ ...alignSample, delta: { pitch_deg: .02, yaw_deg: -.05, roll_deg: .1 }, in_range_seconds: 3.2,
+    can_complete: true, entered_range: true, guidance: { within_tolerance: true, screws: [] } });
+  assert(!document.getElementById("alignComplete").disabled && document.getElementById("alignHold").textContent.includes("3.2 / 3"),
+    "complete enabled after 3 s in range");
+  renderAlign({ ...alignSample, delta: null, baseline_version: null, guidance: null });
+  assert(document.querySelector("#alignPitch strong").textContent === "10.30 °" &&
+    document.getElementById("alignStatus").textContent.includes("尚未設定基準"), "absolute angles without a baseline");
   window.fetch = realFetch;
   location.hash = "#/measure";
   await eventually(() => !document.getElementById("viewMeasure").hidden);
@@ -307,8 +330,10 @@ class DashboardContractTests(unittest.TestCase):
         measure_view = self.html[self.html.index('id="viewMeasure"'):self.html.index("<footer>")]
         for value in ("<img", "<video", "<canvas"):
             self.assertNotIn(value, measure_view)
-        self.assertEqual(self.html.count("<img"), 1)  # the ③ preview, opened on request only
-        self.assertIn('id="ticksPreview"', self.html)
+        self.assertEqual(self.html.count("<img"), 2)  # ② and ③ previews, opened on request only
+        for value in ('id="ticksPreview"', 'id="alignPreview"', 'id="alignPitch"', 'data-teach="A/start"',
+                      '"/api/align/complete"', '"/api/align/baseline"'):
+            self.assertIn(value, self.html)
         for value in ('id="captureOptionsCard"', 'id="referenceDeg"', 'id="aAxisDeg"', 'id="sweepDirection"',
                       'id="burstFrames"', 'id="captureNote"', 'id="calibrationBanner"'):
             self.assertIn(value, self.html)

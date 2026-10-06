@@ -39,7 +39,7 @@ def ask_to_save_csv():
         print("請輸入 y（儲存）或 n（不儲存）。")
 
 
-def api_routes(manager, ticks, runtime):
+def api_routes(manager, ticks, runtime, align=None):
     """(method, path regex, handler(params, body) -> (status, json)) for the web server."""
     def measure_ticks(params, body):
         if manager.mode != "ticks":
@@ -57,8 +57,22 @@ def api_routes(manager, ticks, runtime):
         except FileNotFoundError as error:
             return 404, {"status": "error", "error_code": "NOT_FOUND", "message": str(error)}
 
+    def in_align(handler):
+        def run(params, body):
+            if manager.mode != "align":
+                return 409, {"status": "error", "error_code": "WRONG_MODE", "message": "請先切換到相機對位模式"}
+            return handler(params, body)
+        return run
+
     kinds, version = r"(?P<kind>geometry|vial|alignment)", r"(?P<version>[0-9A-Za-z_]{1,64})"
-    return [
+    align_routes = [] if align is None else [
+        ("GET", r"/api/align", lambda params, body: (200, align.status())),
+        ("POST", r"/api/align/teach/(?P<screw>[AB])/(?P<step>start|finish)",
+         in_align(lambda params, body: align.teach(params["screw"], params["step"]))),
+        ("POST", r"/api/align/complete", in_align(lambda params, body: align.complete())),
+        ("POST", r"/api/align/baseline", in_align(lambda params, body: align.set_baseline(body.get("confirm") is True))),
+    ]
+    return align_routes + [
         ("POST", r"/api/ticks/measure", measure_ticks),
         ("GET", r"/api/ticks/(?P<id>[0-9a-f]{12})", tick_result),
         ("POST", r"/api/ticks/(?P<id>[0-9a-f]{12})/apply",
@@ -95,8 +109,9 @@ def run():
     runtime = CalibrationRuntime(store, measure, lambda: camera.undistorter if camera.camera is not None else None)
     preview = PreviewBuffer()
     ticks = TickProcessor(runtime=runtime, camera=camera, publish=publish, preview=preview)
+    align = AlignProcessor(store=store, runtime=runtime, camera=camera, publish=publish, preview=preview)
     manager = ModeManager(
-        {"measure": measure, "align": AlignProcessor(publish=publish), "ticks": ticks},
+        {"measure": measure, "align": align, "ticks": ticks},
         on_change=lambda mode_state: publish({"type": "state", "schema_version": 1, **mode_state}),
     )
 
@@ -119,7 +134,7 @@ def run():
                 capture_manager=captures,
                 state_provider=service_state,
                 mode_handler=manager.request,
-                routes=api_routes(manager, ticks, runtime),
+                routes=api_routes(manager, ticks, runtime, align),
                 preview=preview,
             )
             telemetry.start()

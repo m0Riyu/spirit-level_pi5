@@ -131,7 +131,7 @@ class ModeManagerTests(unittest.TestCase):
             captures = CaptureManager(directory, default_burst_frames=1)
             try:
                 measure = MeasureProcessor(detector=detector, captures=captures)
-                manager = ModeManager({"measure": measure, "align": AlignProcessor(), "ticks": TickProcessor()},
+                manager = ModeManager({"measure": measure, "align": AlignProcessor(camera=self.camera), "ticks": TickProcessor()},
                                       initial="ticks")
                 for mode in ("ticks", "align"):
                     manager.request(mode)

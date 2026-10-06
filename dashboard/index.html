@@ -380,6 +380,15 @@
     .status-list { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 0; font-size: 14px; }
     .status-list dt { color: var(--muted); }
     .status-list dd { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .align-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 8px 0; }
+    .align-axis { display: grid; justify-items: center; padding: 12px 6px; border: 1px solid var(--line); border-radius: 16px; }
+    .align-axis span { color: var(--muted); font-size: 15px; font-weight: 800; }
+    .align-axis strong { font-size: clamp(34px, 11vw, 56px); font-variant-numeric: tabular-nums; line-height: 1.15; }
+    .align-axis small { color: var(--muted); font-size: 12px; }
+    .align-axis.ok strong, .screw-list .ok { color: var(--mint); }
+    .align-axis.bad strong, .screw-list .bad { color: var(--red); }
+    .align-roll { color: var(--muted); font-size: 15px; margin: 4px 0 8px; }
+    .screw-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: clamp(20px, 6vw, 28px); font-weight: 800; }
     .page-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
     .page button, .history button {
       padding: 9px 14px; border: 1px solid var(--mint); border-radius: 10px; background: #123d30;
@@ -452,10 +461,39 @@
       <a class="card menu-item" href="#/system"><span class="number">⚙</span><strong>系統</strong><small>狀態、校正版本、服務資訊</small></a>
     </nav>
 
-    <section id="viewAlign" class="view card page" data-mode="align" hidden>
-      <h2>② 相機對位</h2>
-      <p>已切換到相機對位模式（不執行 YOLO）。AprilTag 量測與螺絲引導將於 P4 實作。</p>
-      <p id="alignStatus" class="capture-note">等待資料…</p>
+    <section id="viewAlign" class="view" data-mode="align" hidden>
+      <div class="card page">
+        <h2>② 相機對位</h2>
+        <p id="alignStatus" class="capture-note">等待資料…</p>
+        <div class="align-grid">
+          <div id="alignPitch" class="align-axis"><span>Pitch</span><strong>—</strong><small>雜訊 —</small></div>
+          <div id="alignYaw" class="align-axis"><span>Yaw</span><strong>—</strong><small>雜訊 —</small></div>
+        </div>
+        <div id="alignRoll" class="align-roll">Roll —（機構無法調整，僅供參考）</div>
+        <ul id="alignScrews" class="screw-list"></ul>
+        <p id="alignHold" class="capture-note"></p>
+        <div class="page-actions">
+          <button id="alignComplete" type="button" disabled>完成對位</button>
+          <button id="alignPreviewToggle" type="button">顯示預覽</button>
+        </div>
+        <p id="alignMessage" class="capture-note"></p>
+        <img id="alignPreview" class="preview" alt="AprilTag 預覽" hidden>
+      </div>
+      <div class="card page">
+        <h2>螺絲教學</h2>
+        <p>每顆螺絲：按「開始」→ 順時針轉 1/4 圈 → 按「完成」。A、B 都完成後會自動建立模型。</p>
+        <div class="page-actions">
+          <button type="button" data-teach="A/start">A 開始</button><button type="button" data-teach="A/finish">A 完成</button>
+          <button type="button" data-teach="B/start">B 開始</button><button type="button" data-teach="B/finish">B 完成</button>
+        </div>
+        <p id="alignTeachStatus" class="capture-note">尚未教學</p>
+      </div>
+      <div class="card page">
+        <h2>基準</h2>
+        <p id="alignBaseline">尚未設定基準</p>
+        <p class="capture-note">「設為新基準」只在系統完整校正、量測驗證後使用。</p>
+        <div class="page-actions"><button id="alignSetBaseline" type="button">設為新基準</button></div>
+      </div>
     </section>
 
     <section id="viewTicks" class="view" data-mode="ticks" hidden>
@@ -925,8 +963,11 @@
       for (const [route, id] of Object.entries(ROUTES)) $(id).hidden = route !== currentRoute;
       const mode = ROUTE_MODES[currentRoute];
       if (mode) requestMode(mode);
-      if (currentRoute !== "#/ticks") setTicksPreview(false);
+      if (currentRoute !== "#/ticks") setPreview("ticks", false);
       else refreshHistory();
+      if (currentRoute !== "#/align") setPreview("align", false);
+      else fetch("/api/align", { cache: "no-store" }).then((r) => r.ok ? r.json() : null)
+        .then((data) => data?.type && renderAlign(data)).catch(() => {});
       renderModeBanner();
     }
 
@@ -993,15 +1034,94 @@
     }
 
     function renderModeHeartbeat(data) {
-      if (data.type === "align") {
-        $("alignStatus").textContent = `${data.message} · frame ${data.frame_id} · 擷取 ${number(data.capture_ms, 1, "ms")}`;
-        return;
-      }
+      if (data.type === "align") { renderAlign(data); return; }
       const progress = data.measurement ? ` · 量測中 ${data.measurement.frames_collected} / ${data.measurement.frames_target} 幀` : "";
       $("ticksStatus").textContent = `即時偵測 ${data.tick_count} / ${data.expected_tick_count} 條刻度` +
         ` · Roll ${number(data.roll_deg, 2, "°", true)}${progress}`;
       if (data.finished && data.finished.id === tickMeasurementId) renderTickResult(data.finished);
     }
+
+    // ---- ② camera alignment -------------------------------------------------
+    let audioContext = null;
+    function alertInRange() {
+      navigator.vibrate?.(200);  // not supported on iOS
+      try {
+        audioContext ||= new (window.AudioContext || window.webkitAudioContext)();
+        const oscillator = audioContext.createOscillator(), gain = audioContext.createGain();
+        oscillator.frequency.value = 880; gain.gain.value = .08;
+        oscillator.connect(gain).connect(audioContext.destination);
+        oscillator.start(); oscillator.stop(audioContext.currentTime + .15);
+      } catch { /* audio unavailable */ }
+    }
+
+    function renderAxis(id, value, std, hasBaseline, tolerance) {
+      const box = $(id);
+      box.querySelector("strong").textContent = number(value, hasBaseline ? 3 : 2, "°", hasBaseline);
+      box.querySelector("small").textContent = `雜訊 ${number(std, 3, "°")}`;
+      box.classList.toggle("ok", hasBaseline && value != null && Math.abs(value) <= tolerance);
+      box.classList.toggle("bad", hasBaseline && value != null && Math.abs(value) > tolerance);
+    }
+
+    function renderAlign(data) {
+      const angles = data.angles || {}, delta = data.delta, hasBaseline = Boolean(delta);
+      const shown = hasBaseline ? delta : angles;
+      $("alignStatus").textContent = `AprilTag ${data.pose_count} / ${data.tag_count} · ` +
+        (hasBaseline ? `相對基準 ${data.baseline_version}` : "尚未設定基準：顯示絕對角度") +
+        ` · ${data.window_full ? `${angles.frames} 幀平均` : "收集中…"}`;
+      renderAxis("alignPitch", shown.pitch_deg, angles.pitch_deg_std, hasBaseline, data.tolerance_deg);
+      renderAxis("alignYaw", shown.yaw_deg, angles.yaw_deg_std, hasBaseline, data.tolerance_deg);
+      $("alignRoll").textContent = `Roll ${number(shown.roll_deg, hasBaseline ? 3 : 2, "°", hasBaseline)}（機構無法調整，僅供參考）`;
+      const screws = data.guidance?.screws || [];
+      $("alignScrews").replaceChildren(...(screws.length ? screws.map((item) => {
+        const row = document.createElement("li");
+        row.className = item.ok ? "ok" : "bad";
+        row.textContent = `螺絲 ${item.screw}　${item.label}`;
+        return row;
+      }) : [Object.assign(document.createElement("li"), {
+        textContent: !hasBaseline ? "設定基準後才有螺絲引導" : (data.model_ready ? "收集中…" : "尚未教學螺絲模型") })]));
+      $("alignHold").textContent = hasBaseline ? (data.guidance?.within_tolerance
+        ? `範圍內（±${data.tolerance_deg}°）${data.in_range_seconds.toFixed(1)} / ${data.hold_seconds_required} 秒`
+        : `目標：Pitch、Yaw 都在 ±${data.tolerance_deg}° 內持續 ${data.hold_seconds_required} 秒`) : "";
+      $("alignComplete").disabled = !data.can_complete;
+      if (data.entered_range) alertInRange();
+      const teaching = Object.entries(data.teaching || {}).map(([screw, steps]) => `${screw}：${steps.join("、") || "收集中"}`);
+      $("alignTeachStatus").textContent = [data.model_ready ? "螺絲模型已建立" : "尚未建立螺絲模型", ...teaching,
+        ...(data.collecting || []).map((label) => `收集中：${label}`)].join(" · ");
+      $("alignBaseline").textContent = data.baseline_version ? `目前基準：${data.baseline_version}` : "尚未設定基準";
+      if (data.message) $("alignMessage").textContent = data.message;
+    }
+
+    async function alignAction(path, body = {}) {
+      try {
+        const response = await postJson(path, body);
+        $("alignMessage").textContent = response.data.message || ({ collecting: "收集中…", completed: "已完成對位" })[response.data.status] || "";
+        return response;
+      } catch (error) { $("alignMessage").textContent = `失敗：${error.message}`; }
+    }
+
+    $("alignComplete").addEventListener("click", async () => {
+      const response = await alignAction("/api/align/complete");
+      if (response?.ok) {
+        $("alignMessage").textContent = "已完成對位並記錄。相機動過，幾何校正已設為「待確認」，請前往 ③ 刻度檢查。";
+        if (response.data.calibration) applyState({ calibration: response.data.calibration });
+      }
+    });
+    for (const button of document.querySelectorAll("[data-teach]")) {
+      button.addEventListener("click", () => alignAction(`/api/align/teach/${button.dataset.teach}`));
+    }
+    let baselineArmed = false;
+    $("alignSetBaseline").addEventListener("click", async () => {
+      if (!baselineArmed) {
+        baselineArmed = true;
+        $("alignSetBaseline").textContent = "確定要以目前角度為新基準？再按一次";
+        $("alignSetBaseline").classList.add("warn");
+        return;
+      }
+      baselineArmed = false;
+      $("alignSetBaseline").textContent = "設為新基準";
+      $("alignSetBaseline").classList.remove("warn");
+      await alignAction("/api/align/baseline", { confirm: true });
+    });
 
     // ---- ③ tick check ------------------------------------------------------
     let tickMeasurementId = null;
@@ -1126,13 +1246,15 @@
       } catch { /* offline */ }
     }
 
-    function setTicksPreview(visible) {
-      const image = $("ticksPreview");
+    function setPreview(name, visible) {
+      const image = $(`${name}Preview`);
       if (visible) image.src = `/api/preview.mjpg?ts=${Date.now()}`;
       else image.removeAttribute("src");
       image.hidden = !visible;
-      $("ticksPreviewToggle").textContent = visible ? "關閉預覽" : "顯示預覽";
+      $(`${name}PreviewToggle`).textContent = visible ? "關閉預覽" : "顯示預覽";
     }
+    const setTicksPreview = (visible) => setPreview("ticks", visible);
+    $("alignPreviewToggle").addEventListener("click", () => setPreview("align", $("alignPreview").hidden));
 
     $("ticksMeasure").addEventListener("click", startTickMeasurement);
     $("ticksRemeasure").addEventListener("click", startTickMeasurement);

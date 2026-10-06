@@ -69,6 +69,13 @@ TICK_MEASURE_FRAMES = 20
 GEOMETRY_POLYNOMIAL_DEGREE = 2        # 1-3
 TICK_MAX_RESIDUAL_RMS_PX = 0.5
 TICK_MAX_PITCH_CHANGE = 0.03          # vs the active version; above needs confirmation
+# ② camera alignment (AprilTags on the undistorted full frame).
+ALIGN_AVERAGE_FRAMES = 10             # moving average; also frames per teach/baseline reading
+ALIGN_TOLERANCE_DEG = 0.10            # pitch and yaw vs the baseline
+ALIGN_HOLD_SECONDS = 3.0              # in range this long before "完成對位"
+ALIGN_TEACH_TURN = 0.25               # clockwise turn used while teaching each screw
+ALIGN_PUBLISH_INTERVAL_SECONDS = 0.1  # 10 Hz so the page reacts within 0.5 s
+
 PREVIEW_MAX_FPS = 5
 PREVIEW_JPEG_QUALITY = 60
 
