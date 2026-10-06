@@ -46,6 +46,8 @@ CONFIDENCE_THRESHOLD = 0.25
 # AK7375 V4L2 focus_absolute (vcm_focus_absolute_test.py DEFAULT_INITIAL).
 VCM_FOCUS_ABSOLUTE = 3711
 VCM_FOCUS_SETTLE_SECONDS = 0.25
+# Held by whichever process has the camera open (service or a debug tool).
+CAMERA_LOCK_PATH = Path("/tmp/levelsvc-camera.lock")
 
 # Two-layer calibration, versioned under calibration/<kind>/ (active.json):
 #   geometry: rectified ROI pixel -> divisions (redo whenever the camera moves)

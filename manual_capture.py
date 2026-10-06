@@ -634,6 +634,21 @@ class CaptureManager:
         return {"disk_free_mb": free / 1024 ** 2, "bytes_per_capture": per_capture,
                 "estimated_remaining_captures": int(usable // max(per_capture, 1))}
 
+    def cancel_pending(self, code, message):
+        """End queued requests and unfinished bursts (e.g. leaving measure mode).
+
+        Frozen jobs already handed to the writer are still saved.
+        """
+        with self._lock:
+            requests = []
+            while not self.requests.empty():
+                requests.append(self.requests.get_nowait())
+                self.requests.task_done()
+            requests += [burst.request for burst in self._bursts.values()]
+        for request in requests:
+            self._finish_error(request, code, message)
+        return len(requests)
+
     def close(self):
         with self._lock:
             if self._closed:

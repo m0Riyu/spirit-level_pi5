@@ -1,6 +1,8 @@
 """Regression tests for direct V4L2 focus and camera startup failures."""
 
 import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -68,7 +70,53 @@ class FocusTests(unittest.TestCase):
             )
 
 
+class CameraLockTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.path = Path(self.directory.name) / "camera.lock"
+        self.addCleanup(self.directory.cleanup)
+        patcher = patch.object(camera, "_process_lock", None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_lock_is_held_for_the_process_and_names_the_owner(self):
+        first = camera.acquire_camera_lock(self.path)
+        self.addCleanup(first.close)
+        self.assertIs(camera.acquire_camera_lock(self.path), first)
+        self.assertIn(f"pid={__import__('os').getpid()}", self.path.read_text())
+
+    def test_second_process_is_refused_with_a_clear_message(self):
+        holder = subprocess.Popen([sys.executable, "-c",
+            "import fcntl,sys,time; f=open(sys.argv[1],'a+'); fcntl.flock(f,fcntl.LOCK_EX); "
+            "f.write('pid=1 levelsvc main.py'); f.flush(); print('locked',flush=True); time.sleep(30)", str(self.path)],
+            stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.wait)
+        self.addCleanup(holder.kill)
+        self.assertEqual(holder.stdout.readline().strip(), "locked")
+        with self.assertRaisesRegex(camera.CameraBusyError, "levelsvc main.py"):
+            camera.acquire_camera_lock(self.path)
+
+    def test_create_camera_takes_the_lock_before_opening_picamera2(self):
+        order = []
+        with (patch.object(camera, "acquire_camera_lock", side_effect=lambda: order.append("lock")),
+              patch.object(camera, "Picamera2", side_effect=lambda: order.append("open") or Mock()),
+              patch.object(camera, "start_camera", side_effect=lambda c, *a: c)):
+            camera.create_camera()
+        self.assertEqual(order, ["lock", "open"])
+
+    def test_busy_camera_never_opens_picamera2(self):
+        with (patch.object(camera, "acquire_camera_lock", side_effect=camera.CameraBusyError("busy")),
+              patch.object(camera, "Picamera2") as picamera):
+            with self.assertRaises(camera.CameraBusyError):
+                camera.create_camera()
+        picamera.assert_not_called()
+
+
 class CameraStartupTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch.object(camera, "acquire_camera_lock")
+        patcher.start()
+        self.addCleanup(patcher.stop)
     def test_starts_stream_then_applies_fixed_focus_and_discards_settling_frames(self):
         instance = Mock()
         instance.camera_controls = {"ExposureTime": (), "LensPosition": (), "AfMode": ()}
@@ -93,6 +141,7 @@ class CameraStartupTests(unittest.TestCase):
             )
 
         self.assertIs(result, instance)
+        self.assertEqual(result.focus_absolute, 3711)
         instance.set_controls.assert_called_once_with({"ExposureTime": 1000})
         focus.assert_called_once_with(Path("/dev/v4l-subdev3"), 3711, 0, 4095, 1)
         instance.capture_array.assert_called_once_with("main")

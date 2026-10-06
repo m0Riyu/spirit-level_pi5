@@ -176,13 +176,23 @@ class AprilTagTests(unittest.TestCase):
                 measurement.run(args)
             self.assertEqual(csv_path.read_bytes(), original)
 
-    def test_focus_startup_failure_closes_camera(self):
-        camera = Mock()
-        with patch("picamera2.Picamera2", return_value=camera), patch.object(measurement, "set_vcm_focus", side_effect=RuntimeError("no focus")):
-            with self.assertRaisesRegex(RuntimeError, "no focus"):
-                measurement.create_camera(3711)
-        camera.start.assert_called_once_with()
-        camera.close.assert_called_once_with()
+    def test_camera_comes_from_the_shared_module_with_requested_focus(self):
+        import camera
+        with patch.object(camera, "create_camera", return_value="shared") as shared:
+            self.assertEqual(measurement.create_camera(3700), "shared")
+        shared.assert_called_once_with(focus=3700)
+
+    def test_busy_camera_stops_before_windows_or_csv(self):
+        import camera
+        with tempfile.TemporaryDirectory() as directory:
+            csv_path = Path(directory) / "run.csv"
+            args = measurement.parse_args(["--headless", "--csv", str(csv_path)])
+            with (patch.object(camera, "acquire_camera_lock", side_effect=camera.CameraBusyError("相機正被其他程式使用")),
+                  patch.object(measurement, "create_camera") as create):
+                with self.assertRaisesRegex(RuntimeError, "其他程式"):
+                    measurement.run(args)
+            create.assert_not_called()
+            self.assertFalse(csv_path.exists())
 
 
 if __name__ == "__main__":

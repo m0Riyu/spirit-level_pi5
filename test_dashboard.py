@@ -221,6 +221,31 @@ BROWSER_SCENARIOS = r"""
     calibration: { geometry_version: "g1_geometry", vial_version: "v1_vial", geometry_pending_confirmation: true } });
   assert(!document.getElementById("calibrationBanner").hidden, "pending geometry shows the yellow banner");
   assert(document.getElementById("calibrationVersions").textContent.includes("v1_vial"), "active calibration versions shown");
+  // Main menu, routes and the shared service mode.
+  assert(!document.getElementById("viewMeasure").hidden && document.getElementById("viewMenu").hidden,
+    "#/measure shows only the measurement view");
+  assert(document.querySelectorAll("#viewMenu a.menu-item").length === 4, "main menu has ① ② ③ ⚙");
+  applyState({ type: "state", mode: "ticks", pending_mode: null, changed_by: "other-phone", last_switch_ms: 31,
+    calibration: { status: "pending", geometry: { version: "g2_geometry", pending_confirmation: true }, vial: { version: "v1_vial" } },
+    system: { cpu_temperature_c: 51.24, git_commit: "abc1234", git_branch: "feature/integrated-modes" },
+    camera: { open: true, open_count: 1, frame_id: 900, focus_absolute: 3711 } });
+  assert(!document.getElementById("modeBanner").hidden &&
+    document.getElementById("modeBannerText").textContent.includes("已被其他裝置切換為「③ 刻度檢查」"),
+    "another phone's mode switch is announced on this page");
+  assert(document.getElementById("statusCalibration").textContent === "待確認" &&
+    document.getElementById("statusTemperature").textContent === "51.2 °C", "status bar shows calibration and temperature");
+  assert(document.getElementById("systemStatus").textContent.includes("第 1 次開啟") &&
+    document.getElementById("systemStatus").textContent.includes("abc1234"), "system page lists camera and version");
+  applyState({ mode: "measure", pending_mode: null, changed_by: clientId });
+  assert(document.getElementById("modeBanner").hidden, "banner clears when this page's mode is active");
+  applyState({ mode: "align", pending_mode: "measure", changed_by: clientId });
+  assert(document.getElementById("modeBanner").hidden, "no banner while this page's own switch is pending");
+  location.hash = "#/system";
+  await eventually(() => !document.getElementById("viewSystem").hidden);
+  assert(document.getElementById("viewMeasure").hidden && document.getElementById("modeBanner").hidden,
+    "system page does not claim a camera mode");
+  location.hash = "#/measure";
+  await eventually(() => !document.getElementById("viewMeasure").hidden);
   for (const store of [reopened, recovery.store, failure.store]) store.db.close();
   return { checks, csv };
 })()
@@ -241,6 +266,12 @@ class DashboardContractTests(unittest.TestCase):
             self.assertNotIn(value, self.html)
         for value in ('id="captureOptionsCard"', 'id="referenceDeg"', 'id="aAxisDeg"', 'id="sweepDirection"',
                       'id="burstFrames"', 'id="captureNote"', 'id="calibrationBanner"'):
+            self.assertIn(value, self.html)
+
+    def test_main_menu_routes_and_mode_api(self):
+        for value in ('id="viewMenu"', 'href="#/measure"', 'href="#/align"', 'href="#/ticks"', 'href="#/system"',
+                      'id="viewAlign"', 'id="viewTicks"', 'id="viewSystem"', 'id="statusBar"', 'id="modeBanner"',
+                      '"/api/mode"', '"/api/state"'):
             self.assertIn(value, self.html)
 
     def test_post_body_is_id_plus_options_and_indexeddb_key_is_id(self):
@@ -264,7 +295,7 @@ class BrowserCaptureTests(unittest.TestCase):
                 "--password-store=basic", "--disable-dev-shm-usage", "--no-first-run",
                 "--no-default-browser-check", "--no-proxy-server",
                 "--remote-debugging-port=0", f"--user-data-dir={profile}",
-                (config.APP_DIRECTORY / "dashboard/index.html").as_uri() + "?wsPort=1"],
+                (config.APP_DIRECTORY / "dashboard/index.html").as_uri() + "?wsPort=1#/measure"],
                 stdout=subprocess.DEVNULL, stderr=browser_log)
             try:
                 port_path = Path(profile) / "DevToolsActivePort"

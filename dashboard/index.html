@@ -356,6 +356,35 @@
     .capture-controls .capture-note { flex: 1 1 260px; line-height: 1.5; }
     .capture-controls button:disabled { opacity: .4; cursor: wait; }
     .capture-note { color: var(--muted); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+    .status-bar {
+      position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5;
+      display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center;
+      margin: 0 0 12px; padding: 8px 14px; border: 1px solid var(--line); border-radius: 14px;
+      background: rgba(7, 17, 15, 0.92); color: var(--muted); font-size: 13px;
+    }
+    .status-bar a { color: var(--mint); font-weight: 800; text-decoration: none; }
+    .status-bar strong { color: var(--text); }
+    .status-bar .pending { color: var(--yellow); }
+    .status-bar .unavailable { color: var(--red); }
+    .menu { display: grid; gap: 12px; }
+    .menu-item {
+      display: grid; grid-template-columns: 52px 1fr; align-items: center; gap: 4px 12px;
+      padding: 18px; color: var(--text); text-decoration: none;
+    }
+    .menu-item .number { grid-row: span 2; color: var(--mint); font-size: 34px; font-weight: 800; text-align: center; }
+    .menu-item strong { font-size: 20px; }
+    .menu-item small { color: var(--muted); font-size: 13px; }
+    .page { padding: 18px; }
+    .page h2 { margin: 0 0 8px; color: var(--mint); font-size: 22px; }
+    .page p { margin: 0 0 10px; color: var(--muted); line-height: 1.6; }
+    .status-list { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 0; font-size: 14px; }
+    .status-list dt { color: var(--muted); }
+    .status-list dd { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .mode-banner { border-color: var(--orange); background: rgba(255, 154, 95, 0.14); color: #ffd3b8; }
+    .mode-banner button {
+      margin-left: 8px; padding: 4px 10px; border: 1px solid var(--orange); border-radius: 8px;
+      background: transparent; color: inherit; font: inherit; cursor: pointer;
+    }
     .calibration-banner {
       margin: 0 0 12px; padding: 10px 14px; border: 1px solid var(--yellow); border-radius: 14px;
       background: rgba(255, 215, 94, 0.14); color: #ffe9a3; font-size: 14px; font-weight: 700; line-height: 1.5;
@@ -394,6 +423,43 @@
         <span id="connectionText">連線中</span>
       </div>
     </header>
+
+    <div id="statusBar" class="status-bar" role="status">
+      <a href="#/">☰ 主選單</a>
+      <span>模式 <strong id="statusMode">—</strong></span>
+      <span>校正 <strong id="statusCalibration">—</strong></span>
+      <span>CPU <strong id="statusTemperature">—</strong></span>
+    </div>
+    <div id="modeBanner" class="calibration-banner mode-banner" role="alert" hidden>
+      <span id="modeBannerText">模式已被切換</span><button id="reclaimMode" type="button">切回此模式</button>
+    </div>
+
+    <nav id="viewMenu" class="view menu" aria-label="主選單">
+      <a class="card menu-item" href="#/measure"><span class="number">①</span><strong>量測</strong><small>氣泡量測、參考值與連拍記錄</small></a>
+      <a class="card menu-item" href="#/align"><span class="number">②</span><strong>相機對位</strong><small>AprilTag 角度與螺絲調整引導</small></a>
+      <a class="card menu-item" href="#/ticks"><span class="number">③</span><strong>刻度檢查</strong><small>量測刻度並更新幾何校正</small></a>
+      <a class="card menu-item" href="#/system"><span class="number">⚙</span><strong>系統</strong><small>狀態、校正版本、服務資訊</small></a>
+    </nav>
+
+    <section id="viewAlign" class="view card page" data-mode="align" hidden>
+      <h2>② 相機對位</h2>
+      <p>已切換到相機對位模式（不執行 YOLO）。AprilTag 量測與螺絲引導將於 P4 實作。</p>
+      <p id="alignStatus" class="capture-note">等待資料…</p>
+    </section>
+
+    <section id="viewTicks" class="view card page" data-mode="ticks" hidden>
+      <h2>③ 刻度檢查</h2>
+      <p>已切換到刻度檢查模式（不執行 YOLO）。多幀刻度量測、擬合與套用將於 P3 實作。</p>
+      <p id="ticksStatus" class="capture-note">等待資料…</p>
+    </section>
+
+    <section id="viewSystem" class="view card page" hidden>
+      <h2>⚙ 系統</h2>
+      <p>唯讀狀態。重啟服務、重新開機、關機與 LOG 下載將於 P5 實作。</p>
+      <dl id="systemStatus" class="status-list"></dl>
+    </section>
+
+    <div id="viewMeasure" class="view" data-mode="measure" hidden>
 
     <div id="calibrationBanner" class="calibration-banner" role="status" hidden>
       幾何校正待確認：相機可能動過，請重做刻度檢查。仍可量測。
@@ -505,6 +571,8 @@
         </div>
       </section>
     </details>
+
+    </div>
 
     <footer>
       <div id="lastUpdate">尚未收到資料</div>
@@ -749,6 +817,8 @@
         let data;
         try { data = JSON.parse(event.data); } catch { return; }
         if (data.type === "telemetry") renderTelemetry(data);
+        else if (data.type === "state") applyState(data);
+        else if (data.type === "align" || data.type === "ticks") renderModeHeartbeat(data);
       });
 
       socket.addEventListener("close", () => {
@@ -806,6 +876,103 @@
     });
     phoneCapture.init();
     setInterval(() => phoneCapture.refreshReady(), 2000);
+
+    // ---- Main menu, routing and service mode ------------------------------
+    const ROUTES = { "#/": "viewMenu", "#/measure": "viewMeasure", "#/align": "viewAlign",
+      "#/ticks": "viewTicks", "#/system": "viewSystem" };
+    const ROUTE_MODES = { "#/measure": "measure", "#/align": "align", "#/ticks": "ticks" };
+    const MODE_LABELS = { measure: "① 量測", align: "② 相機對位", ticks: "③ 刻度檢查" };
+    const CALIBRATION_LABELS = { ok: ["正常", ""], pending: ["待確認", "pending"], unavailable: ["未載入", "unavailable"] };
+    const clientId = CaptureLog.uuid();
+    let serviceState = {};
+    let currentRoute = "#/";
+
+    function routeFromHash() { return ROUTES[location.hash] ? location.hash : "#/"; }
+
+    function showRoute() {
+      currentRoute = routeFromHash();
+      for (const [route, id] of Object.entries(ROUTES)) $(id).hidden = route !== currentRoute;
+      const mode = ROUTE_MODES[currentRoute];
+      if (mode) requestMode(mode);
+      renderModeBanner();
+    }
+
+    async function requestMode(mode) {
+      try {
+        const response = await fetch("/api/mode", { method: "POST", cache: "no-store",
+          headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode, client_id: clientId }) });
+        if (response.ok) applyState(await response.json());
+      } catch (error) { console.warn("模式切換失敗", error); }
+    }
+
+    async function refreshState() {
+      try {
+        const response = await fetch("/api/state", { cache: "no-store" });
+        if (response.ok) applyState(await response.json());
+      } catch { /* offline: keep the last known state */ }
+    }
+
+    function applyState(state) {
+      serviceState = { ...serviceState, ...state };
+      $("statusMode").textContent = MODE_LABELS[serviceState.mode] || "—";
+      const calibration = CALIBRATION_LABELS[serviceState.calibration?.status];
+      $("statusCalibration").textContent = calibration ? calibration[0] : "—";
+      $("statusCalibration").className = calibration ? calibration[1] : "";
+      const temperature = serviceState.system?.cpu_temperature_c;
+      $("statusTemperature").textContent = number(temperature, 1, "°C");
+      renderModeBanner();
+      renderSystemStatus();
+    }
+
+    function renderModeBanner() {
+      const wanted = ROUTE_MODES[currentRoute];
+      const active = serviceState.mode;
+      const switching = serviceState.pending_mode === wanted;
+      const visible = Boolean(wanted && active && active !== wanted && !switching);
+      $("modeBanner").hidden = !visible;
+      if (visible) {
+        const who = serviceState.changed_by && serviceState.changed_by !== clientId ? "已被其他裝置切換為" : "目前模式為";
+        $("modeBannerText").textContent = `模式${who}「${MODE_LABELS[active]}」，此頁的資料已停止更新。`;
+      }
+    }
+
+    function renderSystemStatus() {
+      const state = serviceState, system = state.system || {}, camera = state.camera || {}, calibration = state.calibration || {};
+      const hours = system.service_uptime_seconds == null ? null : system.service_uptime_seconds / 3600;
+      const rows = [
+        ["目前模式", MODE_LABELS[state.mode] || "—"],
+        ["最近切換", state.last_switch_ms == null ? "—" : `${state.last_switch_ms.toFixed(0)} ms · ${state.changed_at_iso || ""}`],
+        ["相機", camera.open ? `已開啟（第 ${camera.open_count} 次開啟）· frame ${camera.frame_id} · 對焦 ${camera.focus_absolute ?? "—"}` : "未開啟"],
+        ["幾何校正", `${calibration.geometry?.version || "—"}${calibration.geometry?.pending_confirmation ? "（待確認）" : ""}`],
+        ["水平儀校正", calibration.vial?.version || "—"],
+        ["對位基準", calibration.alignment?.version || "—"],
+        ["CPU 溫度", number(system.cpu_temperature_c, 1, "°C")],
+        ["負載（1 分）", number(system.load_average_1m, 2, "")],
+        ["磁碟剩餘", number(system.disk_free_mb == null ? null : system.disk_free_mb / 1024, 1, "GB")],
+        ["服務執行時間", number(hours, 2, "小時")],
+        ["程式版本", `${system.git_branch || "—"} @ ${system.git_commit || "—"}`],
+      ];
+      $("systemStatus").replaceChildren(...rows.flatMap(([label, value]) => {
+        const term = document.createElement("dt"), detail = document.createElement("dd");
+        term.textContent = label; detail.textContent = value;
+        return [term, detail];
+      }));
+    }
+
+    function renderModeHeartbeat(data) {
+      const target = data.type === "align" ? $("alignStatus") : $("ticksStatus");
+      target.textContent = `${data.message} · frame ${data.frame_id} · 擷取 ${number(data.capture_ms, 1, "ms")}`;
+    }
+
+    $("reclaimMode").addEventListener("click", () => {
+      const mode = ROUTE_MODES[currentRoute];
+      if (mode) requestMode(mode);
+    });
+    window.addEventListener("hashchange", showRoute);
+    // Another phone may switch modes: keep the bar, banner and system page current.
+    setInterval(refreshState, 2000);
+    showRoute();
+    refreshState();
 
     setInterval(() => {
       if (lastTelemetryAt && Date.now() - lastTelemetryAt > 2500) {

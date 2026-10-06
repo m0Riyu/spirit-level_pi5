@@ -13,7 +13,9 @@ from unittest.mock import Mock, patch
 import numpy as np
 
 import app
+import camera_service
 import config
+import processors.measure
 from calibration_store import CalibrationStore
 from camera_undistortion import FullFrameUndistorter
 from detector import Detection, Prediction
@@ -69,7 +71,8 @@ class MainUndistortionTests(unittest.TestCase):
                 patch.object(app, "YoloDetector", return_value=detector),
                 patch.object(app, "create_camera", return_value=camera),
                 patch.object(app, "TelemetryServer", return_value=telemetry),
-                patch.object(app, "show_frame", return_value=True) as show,
+                patch.object(processors.measure, "show_frame", return_value=True) as show,
+                patch.object(app, "system_summary", return_value={}),
                 patch.object(app, "close_windows"),
                 patch.object(app, "ask_to_save_csv", return_value=True),
                 contextlib.redirect_stdout(io.StringIO()),
@@ -120,7 +123,7 @@ class CalibrationMismatchTests(unittest.TestCase):
             detector.predict.side_effect = KeyboardInterrupt
             with (patch.object(app, "YoloDetector", return_value=detector),
                   patch.object(app, "create_camera", return_value=camera),
-                  patch.object(app, "capture_frames", return_value=(None, None, np.zeros((160, 740, 3), np.uint8))),
+                  patch.object(camera_service, "capture_frames", return_value=(None, None, np.zeros((160, 740, 3), np.uint8))),
                   patch.object(app, "TelemetryServer", return_value=telemetry),
                   patch.object(app, "close_windows"),
                   patch.object(config, "ENABLE_CONTINUOUS_CSV", False)):

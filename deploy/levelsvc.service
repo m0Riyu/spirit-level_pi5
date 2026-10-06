@@ -1,0 +1,30 @@
+# levelsvc: spirit-level measurement service (V2 development: ports 8100/8865).
+#
+# Not installed automatically. Install / start (no boot autostart before P5):
+#   sudo cp deploy/levelsvc.service /etc/systemd/system/levelsvc.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl start levelsvc        # stop: sudo systemctl stop levelsvc
+#   journalctl -u levelsvc -f            # live log
+# The old version and levelsvc share one camera: never run both.
+
+[Unit]
+Description=Spirit level measurement service (levelsvc, V2)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Ordinary user, never root; camera access comes from the user's video group.
+User=user
+Group=user
+WorkingDirectory=/home/user/my_project_V2/live_yolo1_app
+ExecStart=/home/user/my_project_V2/live_yolo1_app/.venv/bin/python -u main.py
+Environment=PYTHONUNBUFFERED=1
+# SIGINT takes the Ctrl+C path: frozen captures are written, camera closed.
+KillSignal=SIGINT
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

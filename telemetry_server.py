@@ -120,8 +120,10 @@ def build_telemetry_payload(
 
 
 class _NoCacheRequestHandler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, capture_manager=None, **kwargs):
+    def __init__(self, *args, capture_manager=None, state_provider=None, mode_handler=None, **kwargs):
         self.capture_manager = capture_manager
+        self.state_provider = state_provider
+        self.mode_handler = mode_handler
         super().__init__(*args, **kwargs)
 
     def _json(self, status, payload):
@@ -132,25 +134,39 @@ class _NoCacheRequestHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def do_POST(self):
-        if self.path.split("?", 1)[0] != "/api/captures":
-            self._json(404, {"status": "error", "error_code": "NOT_FOUND", "message": "API not found"})
-            return
+    def _read_json_object(self, maximum_bytes):
+        """Same-origin JSON object body, or None after an error response."""
         # Same-origin browser API. A foreign Origin cannot enqueue work.
         origin = self.headers.get("Origin")
         if origin and origin.rstrip("/") != f"http://{self.headers.get('Host')}":
             self._json(403, {"status": "error", "error_code": "INVALID_ORIGIN", "message": "same-origin request required"})
-            return
+            return None
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            if not 0 < length <= 2048:
-                raise ValueError("JSON body must be between 1 and 2048 bytes")
+            if not 0 < length <= maximum_bytes:
+                raise ValueError(f"JSON body must be between 1 and {maximum_bytes} bytes")
             self.connection.settimeout(5)
             payload = json.loads(self.rfile.read(length))
-            if not isinstance(payload, dict) or "request_id" not in payload:
-                raise ValueError("request_id is required")
+            if not isinstance(payload, dict):
+                raise ValueError("JSON body must be an object")
+            return payload
         except (ValueError, UnicodeError, OSError) as error:
             self._json(400, {"status": "error", "error_code": "INVALID_JSON", "message": str(error)})
+            return None
+
+    def do_POST(self):
+        path = self.path.split("?", 1)[0]
+        if path == "/api/mode":
+            self._post_mode()
+            return
+        if path != "/api/captures":
+            self._json(404, {"status": "error", "error_code": "NOT_FOUND", "message": "API not found"})
+            return
+        payload = self._read_json_object(2048)
+        if payload is None:
+            return
+        if "request_id" not in payload:
+            self._json(400, {"status": "error", "error_code": "INVALID_JSON", "message": "request_id is required"})
             return
         if not valid_request_id(payload["request_id"]):
             self._json(400, {"status": "error", "error_code": "INVALID_REQUEST_ID", "message": "request_id must be a UUID"})
@@ -171,8 +187,29 @@ class _NoCacheRequestHandler(SimpleHTTPRequestHandler):
             logging.getLogger(__name__).exception("Capture API submit failed")
             self._json(503, {"status": "error", "error_code": "STATUS_STORE_UNAVAILABLE", "message": "capture status storage unavailable"})
 
+    def _post_mode(self):
+        payload = self._read_json_object(1024)
+        if payload is None:
+            return
+        if self.mode_handler is None:
+            self._json(503, {"status": "error", "error_code": "SERVER_NOT_READY", "message": "mode control unavailable"})
+            return
+        if set(payload) - {"mode", "client_id"} or not isinstance(payload.get("client_id", ""), str):
+            self._json(400, {"status": "error", "error_code": "INVALID_JSON", "message": "send mode and optional client_id"})
+            return
+        try:
+            self._json(200, self.mode_handler(payload.get("mode"), payload.get("client_id", "")))
+        except ValueError as error:
+            self._json(400, {"status": "error", "error_code": "INVALID_MODE", "message": str(error)})
+
     def do_GET(self):
         path = self.path.split("?", 1)[0]
+        if path == "/api/state":
+            if self.state_provider is None:
+                self._json(503, {"status": "error", "error_code": "SERVER_NOT_READY", "message": "state unavailable"})
+            else:
+                self._json(200, self.state_provider())
+            return
         if path == "/api/captures/ready":
             response = {"ready": self.capture_manager is not None and self.capture_manager.ready,
                         "require_stable_for_capture": bool(self.capture_manager and self.capture_manager.require_stable)}
@@ -232,6 +269,8 @@ class TelemetryServer:
         dashboard_port,
         dashboard_directory,
         capture_manager=None,
+        state_provider=None,
+        mode_handler=None,
     ):
         self.websocket_host = websocket_host
         self.websocket_port = int(websocket_port)
@@ -239,11 +278,14 @@ class TelemetryServer:
         self.dashboard_port = int(dashboard_port)
         self.dashboard_directory = Path(dashboard_directory)
         self.capture_manager = capture_manager
+        self.state_provider = state_provider
+        self.mode_handler = mode_handler
 
         self._clients = set()
         self._loop = None
         self._stop_future = None
-        self._queue = None
+        self._latest = {}  # message type -> newest JSON text (event loop only)
+        self._wakeup = None
         self._websocket_thread = None
         self._http_thread = None
         self._http_server = None
@@ -260,6 +302,8 @@ class TelemetryServer:
             _NoCacheRequestHandler,
             directory=str(self.dashboard_directory),
             capture_manager=self.capture_manager,
+            state_provider=self.state_provider,
+            mode_handler=self.mode_handler,
         )
         self._http_server = ThreadingHTTPServer(
             (self.dashboard_host, self.dashboard_port), handler
@@ -302,7 +346,7 @@ class TelemetryServer:
 
         self._loop = asyncio.get_running_loop()
         self._stop_future = self._loop.create_future()
-        self._queue = asyncio.Queue(maxsize=1)
+        self._wakeup = asyncio.Event()
 
         async with serve(
             self._handle_client,
@@ -358,32 +402,31 @@ class TelemetryServer:
             self._clients.discard(websocket)
 
     async def _broadcast_loop(self):
+        # Only the newest message of each type is sent: a slow phone skips
+        # stale telemetry, but a "state" change is never displaced by it.
         while True:
-            message = await self._queue.get()
+            await self._wakeup.wait()
+            self._wakeup.clear()
+            messages, self._latest = list(self._latest.values()), {}
             clients = list(self._clients)
-            if not clients:
-                continue
-            results = await asyncio.gather(
-                *(client.send(message) for client in clients),
-                return_exceptions=True,
-            )
-            for client, result in zip(clients, results):
-                if isinstance(result, Exception):
-                    self._clients.discard(client)
+            for message in messages if clients else ():
+                results = await asyncio.gather(
+                    *(client.send(message) for client in clients),
+                    return_exceptions=True,
+                )
+                for client, result in zip(clients, results):
+                    if isinstance(result, Exception):
+                        self._clients.discard(client)
 
     def publish(self, payload):
-        if self._loop is None or self._queue is None:
+        if self._loop is None or self._wakeup is None:
             return
         message = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        self._loop.call_soon_threadsafe(self._enqueue_latest, message)
+        self._loop.call_soon_threadsafe(self._enqueue_latest, payload.get("type", "telemetry"), message)
 
-    def _enqueue_latest(self, message):
-        if self._queue.full():
-            try:
-                self._queue.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
-        self._queue.put_nowait(message)
+    def _enqueue_latest(self, message_type, message):
+        self._latest[message_type] = message
+        self._wakeup.set()
 
     def stop(self):
         if self._loop is not None and self._stop_future is not None:

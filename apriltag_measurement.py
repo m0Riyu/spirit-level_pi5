@@ -5,7 +5,6 @@ import csv
 import json
 import math
 import os
-import re
 import subprocess
 import time
 from pathlib import Path
@@ -241,60 +240,19 @@ def build_canvas(frame, measurements, camera_matrix, tag_size_m, ruler):
     return canvas
 
 
-def set_vcm_focus(value):
-    for name_path in sorted(Path("/sys/class/video4linux").glob("v4l-subdev*/name")):
-        try:
-            if "ak7375" not in name_path.read_text().lower():
-                continue
-        except OSError:
-            continue
-        device = Path("/dev") / name_path.parent.name
-        break
-    else:
-        raise RuntimeError("Cannot find the AK7375 V4L2 focus device.")
-
-    def control(*arguments):
-        result = subprocess.run(["v4l2-ctl", "-d", str(device), *arguments],
-                                capture_output=True, text=True, timeout=10, check=False)
-        if result.returncode:
-            raise RuntimeError((result.stderr or result.stdout).strip())
-        return result.stdout
-
-    match = re.search(r"focus_absolute[^:]*:\s*min=(-?\d+)\s+max=(-?\d+)\s+step=(\d+)",
-                      control("--list-ctrls"))
-    if not match:
-        raise RuntimeError("Device has no focus_absolute control.")
-    minimum, maximum, step = map(int, match.groups())
-    requested = max(minimum, min(maximum, value))
-    if step > 1:
-        requested = minimum + round((requested - minimum) / step) * step
-        requested = max(minimum, min(maximum, requested))
-    readback = control("--set-ctrl", f"focus_absolute={requested}", "--get-ctrl", "focus_absolute")
-    match = re.search(r"focus_absolute:\s*(-?\d+)", readback)
-    if not match or int(match.group(1)) != requested:
-        raise RuntimeError("Could not verify the requested focus value.")
-    print(f"VCM {device}: focus_absolute={requested}")
-
-
 def create_camera(focus):
-    from picamera2 import Picamera2
+    """Open the camera through the service's shared module: same V4L2 focus,
+    settle time and camera lock. Imported lazily so --image needs no camera."""
+    from camera import create_camera as create_shared_camera
 
-    camera = Picamera2()
-    try:
-        settings = camera.create_preview_configuration(
-            main={"size": (config.DISPLAY_WIDTH, config.DISPLAY_HEIGHT), "format": "RGB888"},
-            raw={"size": (config.RAW_WIDTH, config.RAW_HEIGHT)},
-        )
-        camera.configure(settings)
-        camera.start()
-        set_vcm_focus(focus)
-        deadline = time.monotonic() + config.VCM_SETTLE_SECONDS
-        while time.monotonic() < deadline:
-            camera.capture_array("main")
-        return camera
-    except BaseException:
-        camera.close()
-        raise
+    return create_shared_camera(focus=focus)
+
+
+def ensure_camera_free():
+    """Fail before opening windows if levelsvc or another tool holds the camera."""
+    from camera import acquire_camera_lock
+
+    acquire_camera_lock()
 
 
 def serializable_measurements(measurements):
@@ -323,6 +281,8 @@ def run(args):
     csv_file = None
     next_print = 0.0
     frame_id = 0
+    if image is None:
+        ensure_camera_free()
     try:
         if args.csv is not None:
             csv_file = args.csv.open("x", encoding="utf-8-sig", newline="")

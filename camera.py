@@ -1,7 +1,15 @@
-"""Picamera2 setup and frame capture."""
+"""Picamera2 setup and frame capture, shared by the service and debug tools.
 
+Every entry point opens the camera through create_camera(), so all of them use
+the same V4L2 focus, undistortion and ROI. A per-process lock file makes a
+second camera program fail fast instead of fighting over the sensor.
+"""
+
+import fcntl
+import os
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -10,6 +18,41 @@ from libcamera import controls
 
 import config
 from camera_undistortion import FullFrameUndistorter, load_calibration
+
+
+# Focus is owned by V4L2 (AK7375); libcamera focus controls must not move it.
+FOCUS_CONTROLS = ("AfMode", "LensPosition")
+_process_lock = None
+
+
+class CameraBusyError(RuntimeError):
+    pass
+
+
+def acquire_camera_lock(path=None):
+    """Hold the camera lock for the rest of this process; idempotent."""
+    global _process_lock
+    if _process_lock is not None:
+        return _process_lock
+    path = Path(path or config.CAMERA_LOCK_PATH)
+    file = path.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        file.seek(0)
+        owner = file.read().strip() or "未知程式"
+        file.close()
+        raise CameraBusyError(f"相機正被其他程式使用（{owner}）。請先停止 levelsvc 或其他相機程式。") from None
+    file.seek(0)
+    file.truncate()
+    file.write(f"pid={os.getpid()} {Path(sys.argv[0]).name}\n")
+    file.flush()
+    _process_lock = file
+    return file
+
+
+def without_focus_controls(camera_controls):
+    return {name: value for name, value in (camera_controls or {}).items() if name not in FOCUS_CONTROLS}
 
 
 def find_vcm_device():
@@ -86,17 +129,18 @@ def normalize_camera_controls(camera_controls):
     return normalized
 
 
-def create_camera(initial_controls=None):
+def create_camera(initial_controls=None, *, focus=None):
+    acquire_camera_lock()
     camera = Picamera2()
     try:
-        return start_camera(camera, initial_controls)
+        return start_camera(camera, initial_controls, focus)
     except Exception:
         # The caller cannot close a camera that failed before being returned.
         camera.close()
         raise
 
 
-def start_camera(camera, initial_controls):
+def start_camera(camera, initial_controls, focus=None):
     image_size = (config.FRAME_WIDTH, config.FRAME_HEIGHT)
     matrix, distortion = load_calibration(config.CAMERA_CALIBRATION_NPZ, image_size)
     camera.frame_undistorter = FullFrameUndistorter(
@@ -111,10 +155,7 @@ def start_camera(camera, initial_controls):
     )
     camera.configure(camera_config)
 
-    requested_controls = normalize_camera_controls(initial_controls or {})
-    # Focus is owned by V4L2; libcamera focus controls must not override it.
-    requested_controls.pop("AfMode", None)
-    requested_controls.pop("LensPosition", None)
+    requested_controls = normalize_camera_controls(without_focus_controls(initial_controls))
     supported_controls = {
         name: value
         for name, value in requested_controls.items()
@@ -128,8 +169,9 @@ def start_camera(camera, initial_controls):
     device = find_vcm_device()
     minimum, maximum, step, _, _ = query_focus_control(device)
     requested, actual = set_focus(
-        device, config.VCM_FOCUS_ABSOLUTE, minimum, maximum, step
+        device, config.VCM_FOCUS_ABSOLUTE if focus is None else focus, minimum, maximum, step
     )
+    camera.focus_absolute = actual
     # Drain frames captured while the actuator is settling.
     deadline = time.monotonic() + max(0.0, config.VCM_FOCUS_SETTLE_SECONDS)
     while time.monotonic() < deadline:
@@ -156,6 +198,23 @@ def capture_frames(camera):
 def capture_roi(camera):
     _, frame, roi = capture_frames(camera)
     return frame, roi
+
+
+def describe_image_geometry(camera):
+    """Record the actual remap parameters alongside saved images and CSVs."""
+    undistorter = camera.frame_undistorter
+    return {
+        "coordinate_system": "undistorted",
+        "calibration_npz": str(Path(config.CAMERA_CALIBRATION_NPZ).resolve()),
+        "alpha": config.UNDISTORT_ALPHA,
+        "frame_size": list(undistorter.image_size),
+        "roi_bounds": [config.ROI_X1, config.ROI_Y1, config.ROI_X2, config.ROI_Y2],
+        "roi_origin": [config.ROI_X1, config.ROI_Y1],
+        "original_camera_matrix": undistorter.original_camera_matrix.tolist(),
+        "dist_coeffs": undistorter.distortion.reshape(-1).tolist(),
+        "new_camera_matrix": undistorter.camera_matrix.tolist(),
+        "focus_absolute": getattr(camera, "focus_absolute", None),
+    }
 
 
 def close_camera(camera):
