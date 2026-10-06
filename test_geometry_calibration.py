@@ -48,6 +48,7 @@ class GeometryTests(unittest.TestCase):
         measurement = geometry.measure(370.25 + 18 * 2.427)
         result = payload(measurement, type(NOMINAL_VIAL)("v_vial", .02283, .427))["measurement"]
         self.assertAlmostEqual(result["offset_div"], 2.427, places=9)
+        self.assertAlmostEqual(result["level_offset_div"], 2., places=9)
         self.assertAlmostEqual(result["slope_mm_per_m"], 2 * .02283, places=12)
         self.assertAlmostEqual(result["angle_degrees"], math.degrees(math.atan(2 * .02283 / 1000)), places=15)
 

@@ -204,6 +204,18 @@ BROWSER_SCENARIOS = r"""
       mean_slope_mm_per_m: .04, std_slope_mm_per_m: .001, range_slope_mm_per_m: .003, stable_duration_seconds: 2 } });
   assert(document.getElementById("stabilityState").textContent === "穩定" && document.getElementById("state").textContent === "ADJUST", "stability independent of system level state");
   assert(document.getElementById("calibrationBanner").hidden, "no calibration banner without pending geometry");
+  // Zero offset 0.427 div: slope +0.001 mm/m is 0.0438 div from the level point,
+  // although the bubble is 0.4708 div right of the scale's geometric center.
+  renderTelemetry({ type: "telemetry", frame_id: 44, sent_at_epoch_ms: Date.now(), system_state: "LEVEL",
+    performance: {}, stability: {}, measurement: { valid: true, within_official_range: true, slope_mm_per_m: .001,
+      offset_px: 8.47, offset_div: .4708, level_offset_div: .0438, angle_degrees: .0000573 } });
+  assert(Math.abs(parseFloat(document.getElementById("bubble").style.left) - (50 + .0438 * 9)) < 1e-9,
+    "bubble position uses zero-corrected divisions");
+  assert(document.getElementById("divisions").textContent === "+0.044 div", "division text uses zero-corrected divisions");
+  renderTelemetry({ type: "telemetry", frame_id: 45, sent_at_epoch_ms: Date.now(), system_state: "OUT_OF_RANGE",
+    performance: {}, stability: {}, measurement: { valid: true, within_official_range: false, offset_px: 2,
+      offset_div: .1, level_offset_div: -5.5 } });
+  assert(document.getElementById("bubble").style.left === "5%", "out-of-range side follows zero-corrected sign");
   renderTelemetry({ type: "telemetry", frame_id: 43, sent_at_epoch_ms: Date.now(), system_state: "ADJUST",
     performance: {}, measurement: {}, stability: {},
     calibration: { geometry_version: "g1_geometry", vial_version: "v1_vial", geometry_pending_confirmation: true } });

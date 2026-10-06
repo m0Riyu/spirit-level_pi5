@@ -99,6 +99,9 @@ def build_telemetry_payload(
             "pixels_per_1_mmm": pixels_per_1_mmm,
             "offset_px": offset_px,
             "offset_div": float(measurement.offset_div) if valid else None,
+            # Divisions from the vial's true level point (zero offset removed);
+            # the dashboard bubble uses this so it matches the displayed slope.
+            "level_offset_div": float(measurement.offset_div) - float(zero_offset_div) if valid else None,
             "direction": measurement.direction if valid else "",
             "slope_mm_per_m": slope_mm_per_m,
             "angle_degrees": angle_degrees,

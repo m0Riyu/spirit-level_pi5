@@ -425,7 +425,7 @@
 
     <section class="card level-visual">
       <div class="level-head">
-        <div class="label">氣泡相對刻度中心</div>
+        <div class="label">氣泡相對水平點</div>
         <div id="divisions" class="division">— div</div>
       </div>
       <div class="track" aria-label="氣泡位置">
@@ -601,8 +601,11 @@
       ui.stateCard.className = "card state-card " + normalized.toLowerCase();
     }
 
+    // Zero-corrected divisions agree with the slope; older servers lack the field.
+    const levelDivisions = (measurement) => measurement.level_offset_div ?? measurement.offset_div;
+
     function showOutOfRange(measurement) {
-      const isLeft = Number(measurement.offset_px) < 0;
+      const isLeft = Number(levelDivisions(measurement)) < 0;
       ui.slope.textContent = "超出範圍";
       ui.pixels.textContent = "—";
       ui.angle.textContent = "—";
@@ -714,10 +717,10 @@
         ui.slope.textContent = number(measurement.slope_mm_per_m, 3, "mm/m", true);
         ui.pixels.textContent = number(measurement.offset_px, 2, "px", true);
         ui.angle.textContent = number(measurement.angle_degrees, 4, "°", true);
-        ui.divisions.textContent = number(measurement.offset_div, 3, "div", true);
+        ui.divisions.textContent = number(levelDivisions(measurement), 3, "div", true);
         ui.confidence.textContent = number((data.confidence || 0) * 100, 1, "%");
 
-        const divisions = Math.max(-5, Math.min(5, Number(measurement.offset_div)));
+        const divisions = Math.max(-5, Math.min(5, Number(levelDivisions(measurement))));
         ui.bubble.style.left = `${50 + divisions * 9}%`;
         ui.bubble.style.opacity = "1";
         ui.bubble.classList.remove("out-of-range");
