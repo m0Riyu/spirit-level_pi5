@@ -621,6 +621,11 @@ class CaptureManager:
                 except OSError:
                     LOG.exception("Could not remove incomplete capture file %s", path.name)
 
+    def idle(self):
+        """No queued, collecting or unwritten capture (safe to stop the camera)."""
+        with self._lock:
+            return not self._active and self.requests.empty() and self.jobs.unfinished_tasks == 0
+
     def storage_estimate(self):
         """Free disk and how many more default triggers fit above the reserve."""
         with self._lock:

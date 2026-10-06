@@ -1,0 +1,3 @@
+# /etc/sudoers.d/levelsvc — the levelsvc user may run ONLY these, no password.
+# Install: sudo visudo -cf deploy/levelsvc.sudoers && sudo install -m 0440 deploy/levelsvc.sudoers /etc/sudoers.d/levelsvc
+user ALL=(root) NOPASSWD: /usr/bin/systemctl poweroff, /usr/bin/systemctl reboot, /usr/bin/systemctl restart levelsvc

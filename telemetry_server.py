@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import re
+import shutil
 import socket
 import threading
 import time
@@ -12,8 +13,21 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from dataclasses import dataclass
+
 from manual_capture import parse_capture_options, valid_request_id
 from stability import finite_number
+
+PIN_HEADER = "X-Levelsvc-Pin"
+
+
+@dataclass
+class FileDownload:
+    """Route result streamed as a file attachment (deleted after sending)."""
+    path: Path
+    filename: str
+    content_type: str = "application/zip"
+    delete: bool = True
 
 
 def build_telemetry_payload(
@@ -123,7 +137,8 @@ def build_telemetry_payload(
 
 class _NoCacheRequestHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, capture_manager=None, state_provider=None, mode_handler=None,
-                 routes=(), preview=None, **kwargs):
+                 routes=(), preview=None, pin_guard=None, **kwargs):
+        self.pin_guard = pin_guard
         self.capture_manager = capture_manager
         self.state_provider = state_provider
         self.mode_handler = mode_handler
@@ -132,9 +147,10 @@ class _NoCacheRequestHandler(SimpleHTTPRequestHandler):
         super().__init__(*args, **kwargs)
 
     def _route(self, method):
-        """Generic JSON API: routes are (method, regex, handler(params, body) -> (status, json))."""
+        """Generic API. Routes are (method, regex, handler, needs_pin); handler(params,
+        body) returns (status, json | FileDownload[, after_response])."""
         path = self.path.split("?", 1)[0]
-        for route_method, pattern, handler in self.routes:
+        for route_method, pattern, handler, needs_pin in self.routes:
             match = pattern.fullmatch(path) if route_method == method else None
             if match is None:
                 continue
@@ -143,16 +159,48 @@ class _NoCacheRequestHandler(SimpleHTTPRequestHandler):
                 body = self._read_json_object(4096, allow_empty=True)
                 if body is None:
                     return True
+            if needs_pin:
+                refused = (503, {"status": "error", "error_code": "PIN_NOT_CONFIGURED", "message": "PIN 未設定"}) \
+                    if self.pin_guard is None else self.pin_guard.check(self.headers.get(PIN_HEADER))
+                if refused is not None:
+                    self._json(*refused)
+                    return True
+            after = None
             try:
-                status, response = handler(match.groupdict(), body)
+                result = handler(match.groupdict(), body)
+                status, response = result[:2]
+                after = result[2] if len(result) > 2 else None
             except ValueError as error:
                 status, response = 400, {"status": "error", "error_code": "INVALID_REQUEST", "message": str(error)}
+            except FileNotFoundError as error:
+                status, response = 404, {"status": "error", "error_code": "NOT_FOUND", "message": str(error)}
             except Exception:
                 logging.getLogger(__name__).exception("API %s %s failed", method, path)
                 status, response = 500, {"status": "error", "error_code": "INTERNAL_ERROR", "message": "server error"}
-            self._json(status, response)
+            if isinstance(response, FileDownload):
+                self._send_file(response)
+            else:
+                self._json(status, response)
+            if after is not None:
+                after()
             return True
         return False
+
+    def _send_file(self, download):
+        try:
+            size = download.path.stat().st_size
+            self.send_response(200)
+            self.send_header("Content-Type", download.content_type)
+            self.send_header("Content-Length", str(size))
+            self.send_header("Content-Disposition", f'attachment; filename="{download.filename}"')
+            self.end_headers()
+            with download.path.open("rb") as file:
+                shutil.copyfileobj(file, self.wfile)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            if download.delete:
+                download.path.unlink(missing_ok=True)
 
     def _stream_preview(self):
         if self.preview is None or not self.preview.source:
@@ -326,6 +374,7 @@ class TelemetryServer:
         mode_handler=None,
         routes=(),
         preview=None,
+        pin_guard=None,
     ):
         self.websocket_host = websocket_host
         self.websocket_port = int(websocket_port)
@@ -335,8 +384,10 @@ class TelemetryServer:
         self.capture_manager = capture_manager
         self.state_provider = state_provider
         self.mode_handler = mode_handler
-        self.routes = [(method, re.compile(pattern), handler) for method, pattern, handler in routes]
+        self.routes = [(route[0], re.compile(route[1]), route[2], bool(route[3]) if len(route) > 3 else False)
+                       for route in routes]
         self.preview = preview
+        self.pin_guard = pin_guard
 
         self._clients = set()
         self._loop = None
@@ -363,6 +414,7 @@ class TelemetryServer:
             mode_handler=self.mode_handler,
             routes=self.routes,
             preview=self.preview,
+            pin_guard=self.pin_guard,
         )
         self._http_server = ThreadingHTTPServer(
             (self.dashboard_host, self.dashboard_port), handler

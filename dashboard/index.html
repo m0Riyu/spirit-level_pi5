@@ -389,6 +389,18 @@
     .align-axis.bad strong, .screw-list .bad { color: var(--red); }
     .align-roll { color: var(--muted); font-size: 15px; margin: 4px 0 8px; }
     .screw-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: clamp(20px, 6vw, 28px); font-weight: 800; }
+    .page button.danger { border-color: var(--red); background: #3d1714; }
+    .system-message { font-size: 18px; font-weight: 800; color: var(--yellow); }
+    .pin-panel {
+      position: fixed; left: 12px; right: 12px; bottom: max(12px, env(safe-area-inset-bottom)); z-index: 10;
+      display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 14px; margin: 0;
+    }
+    .pin-panel input { width: 9em; padding: 9px 10px; border: 1px solid var(--line); border-radius: 10px;
+      background: var(--panel-soft); color: var(--text); font: inherit; font-size: 18px; }
+    .pin-panel button { padding: 9px 14px; border: 1px solid var(--mint); border-radius: 10px; background: #123d30;
+      color: #ecfff7; font: inherit; font-weight: 700; }
+    .pin-panel p { flex-basis: 100%; margin: 0; }
+    .history a { color: var(--mint); font-weight: 800; }
     .page-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
     .page button, .history button {
       padding: 9px 14px; border: 1px solid var(--mint); border-radius: 10px; background: #123d30;
@@ -522,11 +534,33 @@
       </div>
     </section>
 
-    <section id="viewSystem" class="view card page" hidden>
-      <h2>⚙ 系統</h2>
-      <p>唯讀狀態。重啟服務、重新開機、關機與 LOG 下載將於 P5 實作。</p>
-      <dl id="systemStatus" class="status-list"></dl>
+    <section id="viewSystem" class="view" hidden>
+      <div class="card page">
+        <h2>⚙ 系統</h2>
+        <dl id="systemStatus" class="status-list"></dl>
+      </div>
+      <div class="card page">
+        <h2>電源與服務</h2>
+        <p>需要 PIN。重啟與重新開機要按兩次確認；關機請長按 2 秒。關機會先等資料寫完、關閉相機，畫面顯示「可以斷電」後再拔電。</p>
+        <div class="page-actions">
+          <button id="systemRestart" type="button" data-action="restart-service">重啟服務</button>
+          <button id="systemReboot" type="button" data-action="reboot">重新開機</button>
+          <button id="systemShutdown" type="button" class="danger">長按 2 秒關機</button>
+        </div>
+        <p id="systemMessage" class="system-message" role="status"></p>
+      </div>
+      <div class="card page">
+        <h2>LOG 下載</h2>
+        <p>每個 session 打包成 zip：CSV、metadata、影像，以及當時使用的校正檔。</p>
+        <ul id="logSessions" class="history"></ul>
+      </div>
     </section>
+
+    <div id="pinPanel" class="pin-panel card" role="dialog" aria-label="輸入 PIN" hidden>
+      <label>PIN <input id="pinInput" type="password" inputmode="numeric" autocomplete="off" maxlength="12"></label>
+      <button id="pinSubmit" type="button">確定</button><button id="pinCancel" type="button">取消</button>
+      <p id="pinMessage" class="capture-note"></p>
+    </div>
 
     <div id="viewMeasure" class="view" data-mode="measure" hidden>
 
@@ -965,6 +999,7 @@
       if (mode) requestMode(mode);
       if (currentRoute !== "#/ticks") setPreview("ticks", false);
       else refreshHistory();
+      if (currentRoute === "#/system") refreshLogSessions();
       if (currentRoute !== "#/align") setPreview("align", false);
       else fetch("/api/align", { cache: "no-store" }).then((r) => r.ok ? r.json() : null)
         .then((data) => data?.type && renderAlign(data)).catch(() => {});
@@ -1024,7 +1059,10 @@
         ["負載（1 分）", number(system.load_average_1m, 2, "")],
         ["磁碟剩餘", number(system.disk_free_mb == null ? null : system.disk_free_mb / 1024, 1, "GB")],
         ["服務執行時間", number(hours, 2, "小時")],
-        ["程式版本", `${system.git_branch || "—"} @ ${system.git_commit || "—"}`],
+        ["剩餘可拍", system.storage?.estimated_remaining_captures == null ? "—" :
+          `約 ${system.storage.estimated_remaining_captures} 次（每次約 ${(system.storage.bytes_per_capture / 1024 ** 2).toFixed(1)} MB）`],
+        ["PIN", system.pin_configured ? "已設定" : "未設定（電源與退回功能停用）"],
+        ["程式版本", `${system.git_branch || "—"} @ ${system.git_commit || "—"}${system.dry_run ? " · 指令模擬模式" : ""}`],
       ];
       $("systemStatus").replaceChildren(...rows.flatMap(([label, value]) => {
         const term = document.createElement("dt"), detail = document.createElement("dd");
@@ -1120,8 +1158,100 @@
       baselineArmed = false;
       $("alignSetBaseline").textContent = "設為新基準";
       $("alignSetBaseline").classList.remove("warn");
-      await alignAction("/api/align/baseline", { confirm: true });
+      const response = await pinPost("/api/align/baseline", { confirm: true });
+      $("alignMessage").textContent = response.data.message || (response.ok ? "收集中…" : "失敗");
     });
+
+    // ---- PIN for protected actions ------------------------------------------
+    let pinValue = null;  // kept in memory for this page only
+    function askPin(message = "") {
+      return new Promise((resolve) => {
+        $("pinPanel").hidden = false;
+        $("pinMessage").textContent = message;
+        $("pinInput").value = "";
+        $("pinInput").focus();
+        const finish = (value) => {
+          $("pinPanel").hidden = true;
+          $("pinSubmit").onclick = $("pinCancel").onclick = $("pinInput").onkeydown = null;
+          resolve(value);
+        };
+        $("pinSubmit").onclick = () => finish($("pinInput").value.trim() || null);
+        $("pinCancel").onclick = () => finish(null);
+        $("pinInput").onkeydown = (event) => { if (event.key === "Enter") finish($("pinInput").value.trim() || null); };
+      });
+    }
+
+    async function pinPost(url, body = {}) {
+      let message = "";
+      while (true) {
+        const pin = pinValue || await askPin(message);
+        if (!pin) return { ok: false, cancelled: true, data: { message: "已取消" } };
+        const response = await fetch(url, { method: "POST", cache: "no-store", body: JSON.stringify(body),
+          headers: { "Content-Type": "application/json", "X-Levelsvc-Pin": pin } });
+        const data = await response.json();
+        if (response.status === 401) { pinValue = null; message = data.message; continue; }
+        if (response.status === 423 || response.status === 503) { pinValue = null; return { ok: false, code: response.status, data }; }
+        pinValue = pin;
+        return { ok: response.ok, code: response.status, data };
+      }
+    }
+
+    // ---- ⚙ system ------------------------------------------------------------
+    async function systemAction(action) {
+      $("systemMessage").textContent = action === "restart-service" ? "要求重啟服務…" : "正在安全停止：等待資料寫入、關閉相機…";
+      const response = await pinPost(`/api/system/${action}`);
+      $("systemMessage").textContent = response.data.message || (response.ok ? "完成" : "失敗");
+    }
+
+    let armedSystemAction = null;
+    for (const id of ["systemRestart", "systemReboot"]) {
+      const button = $(id), label = button.textContent;
+      button.addEventListener("click", () => {
+        if (armedSystemAction !== id) {
+          armedSystemAction = id;
+          button.textContent = `再按一次確認${label}`;
+          button.classList.add("warn");
+          setTimeout(() => { if (armedSystemAction === id) { armedSystemAction = null; button.textContent = label; button.classList.remove("warn"); } }, 5000);
+          return;
+        }
+        armedSystemAction = null;
+        button.textContent = label;
+        button.classList.remove("warn");
+        systemAction(button.dataset.action);
+      });
+    }
+
+    const LONG_PRESS_MS = 2000;
+    let shutdownTimer = null;
+    function cancelShutdownPress() {
+      if (shutdownTimer) clearTimeout(shutdownTimer);
+      shutdownTimer = null;
+      $("systemShutdown").textContent = "長按 2 秒關機";
+    }
+    $("systemShutdown").addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      $("systemShutdown").textContent = "持續按住…";
+      shutdownTimer = setTimeout(() => { shutdownTimer = null; $("systemShutdown").textContent = "長按 2 秒關機"; systemAction("shutdown"); },
+        LONG_PRESS_MS);
+    });
+    for (const name of ["pointerup", "pointerleave", "pointercancel"]) $("systemShutdown").addEventListener(name, cancelShutdownPress);
+
+    async function refreshLogSessions() {
+      try {
+        const response = await fetch("/api/logs/sessions", { cache: "no-store" });
+        if (!response.ok) return;
+        const { sessions } = await response.json();
+        $("logSessions").replaceChildren(...sessions.map((session) => {
+          const row = document.createElement("li"), link = document.createElement("a"), info = document.createElement("span");
+          link.href = `/api/logs/sessions/${session.session_id}.zip`;
+          link.download = `${session.session_id}.zip`;
+          link.textContent = session.session_id;
+          info.textContent = `${session.samples} 筆 · ${session.size_mb.toFixed(1)} MB`;
+          row.append(link, info);
+          return row;
+        }));
+      } catch { /* offline */ }
+    }
 
     // ---- ③ tick check ------------------------------------------------------
     let tickMeasurementId = null;
@@ -1229,7 +1359,7 @@
               return;
             }
             armedActivation = null;
-            const response = await postJson(`/api/calibration/${kind}/${item.version}/activate`);
+            const response = await pinPost(`/api/calibration/${kind}/${item.version}/activate`);
             if (response.ok) applyState({ calibration: response.data });
             refreshHistory();
           });

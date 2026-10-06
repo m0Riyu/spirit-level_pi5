@@ -31,7 +31,7 @@ BROWSER_SCENARIOS = r"""
   assert(compactCard.getBoundingClientRect().height <= 110, "capture controls stay flat at phone width");
   const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
   const eventually = async (condition) => {
-    for (let i = 0; i < 150; i++) { if (await condition()) return; await wait(15); }
+    for (let i = 0; i < 300; i++) { if (await condition()) return; await wait(15); }
     throw new Error("timed out waiting for browser state");
   };
   const makeUi = () => Object.fromEntries(["button", "export", "warning", "status", "count", "record"].map(name => {
@@ -308,6 +308,45 @@ BROWSER_SCENARIOS = r"""
   renderAlign({ ...alignSample, delta: null, baseline_version: null, guidance: null });
   assert(document.querySelector("#alignPitch strong").textContent === "10.30 °" &&
     document.getElementById("alignStatus").textContent.includes("尚未設定基準"), "absolute angles without a baseline");
+  // ⚙ system page: PIN retry, two-press restart, long-press shutdown, LOG list.
+  const pinCalls = [];
+  window.fetch = async (url, options = {}) => {
+    if (url === "/api/logs/sessions") return reply(200, { sessions: [{ session_id: "20261007_010000_abcdef12", samples: 3, size_mb: 6.25 }] });
+    if (url.startsWith("/api/system/")) {
+      pinCalls.push([url, options.headers["X-Levelsvc-Pin"]]);
+      return options.headers["X-Levelsvc-Pin"] === "2468"
+        ? reply(200, { status: "safe_to_power_off", message: "可以斷電" })
+        : reply(401, { status: "error", error_code: "PIN_INVALID", message: "PIN 錯誤（再錯 4 次將鎖定）" });
+    }
+    return reply(404, {});
+  };
+  location.hash = "#/system";
+  await eventually(() => document.getElementById("logSessions").children.length === 1);
+  assert(document.querySelector("#logSessions a").getAttribute("href") === "/api/logs/sessions/20261007_010000_abcdef12.zip",
+    "session zip download link");
+  pinValue = null;
+  const restart = document.getElementById("systemRestart");
+  restart.click();
+  assert(restart.textContent.includes("再按一次") && pinCalls.length === 0, "restart needs a second press");
+  restart.click();
+  await eventually(() => !document.getElementById("pinPanel").hidden);
+  document.getElementById("pinInput").value = "1111";
+  document.getElementById("pinSubmit").click();
+  await eventually(() => document.getElementById("pinMessage").textContent.includes("PIN 錯誤") && !document.getElementById("pinPanel").hidden);
+  document.getElementById("pinInput").value = "2468";
+  document.getElementById("pinSubmit").click();
+  await eventually(() => document.getElementById("systemMessage").textContent === "可以斷電");
+  assert(pinCalls.length === 2 && pinCalls[1][1] === "2468" && pinCalls[0][0] === "/api/system/restart-service",
+    "wrong PIN asks again, right PIN is sent in the header");
+  const shutdown = document.getElementById("systemShutdown");
+  shutdown.dispatchEvent(new PointerEvent("pointerdown"));
+  await wait(300);
+  shutdown.dispatchEvent(new PointerEvent("pointerup"));
+  await wait(2000);
+  assert(pinCalls.length === 2, "a short press does not shut down");
+  shutdown.dispatchEvent(new PointerEvent("pointerdown"));
+  await eventually(() => pinCalls.length === 3);
+  assert(pinCalls[2][0] === "/api/system/shutdown" && pinCalls[2][1] === "2468", "2 s long press shuts down with the PIN");
   window.fetch = realFetch;
   location.hash = "#/measure";
   await eventually(() => !document.getElementById("viewMeasure").hidden);

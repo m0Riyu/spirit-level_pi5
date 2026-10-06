@@ -23,6 +23,7 @@ from mode_manager import ModeManager
 from preview import PreviewBuffer
 from processors.measure import MeasureProcessor
 from processors.ticks import TickProcessor
+from system_controller import PinGuard
 from telemetry_server import TelemetryServer
 from test_telemetry_server import unused_port
 from tick_detection import combine_frames, detect_ticks
@@ -281,14 +282,16 @@ class TickApiTests(unittest.TestCase):
         self.server = TelemetryServer(
             websocket_host="127.0.0.1", websocket_port=unused_port(), dashboard_host="127.0.0.1", dashboard_port=0,
             dashboard_directory=config.APP_DIRECTORY / "dashboard", mode_handler=self.manager.request,
-            routes=app.api_routes(self.manager, self.ticks, self.runtime), preview=self.preview)
+            routes=app.api_routes(self.manager, self.ticks, self.runtime), preview=self.preview,
+            pin_guard=PinGuard("2468"))
         self.server.start()
         self.addCleanup(self.server.stop)
         self.url = f"http://127.0.0.1:{self.server._http_server.server_address[1]}"
 
-    def call(self, path, body=None):
+    def call(self, path, body=None, pin=None):
+        headers = {"Content-Type": "application/json", **({"X-Levelsvc-Pin": pin} if pin else {})}
         request = Request(self.url + path, data=None if body is None else json.dumps(body).encode(),
-                          headers={"Content-Type": "application/json"}, method="GET" if body is None else "POST")
+                          headers=headers, method="GET" if body is None else "POST")
         try:
             response = urlopen(request, timeout=3)
         except HTTPError as error:
@@ -314,10 +317,13 @@ class TickApiTests(unittest.TestCase):
         history = self.call("/api/calibration/geometry")[1]
         self.assertEqual(history["active"]["version"], applied["version"])
         self.assertEqual(len(history["versions"]), 2)
-        status, _ = self.call("/api/calibration/geometry/20261002T072923_geometry/activate", {})
+        rollback = "/api/calibration/geometry/20261002T072923_geometry/activate"
+        self.assertEqual(self.call(rollback, {})[1]["error_code"], "PIN_INVALID")
+        self.assertEqual(self.measure.geometry.version, applied["version"])
+        status, _ = self.call(rollback, {}, pin="2468")
         self.assertEqual(status, 200)
         self.assertEqual(self.measure.geometry.version, "20261002T072923_geometry")
-        self.assertEqual(self.call("/api/calibration/geometry/20250101T000000_geometry/activate", {})[0], 404)
+        self.assertEqual(self.call("/api/calibration/geometry/20250101T000000_geometry/activate", {}, pin="2468")[0], 404)
         self.assertEqual(self.call("/api/ticks/000000000000")[0], 404)
 
     def test_preview_only_in_preview_modes(self):

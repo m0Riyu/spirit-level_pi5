@@ -19,8 +19,8 @@ from preview import PreviewBuffer
 from processors.align import AlignProcessor
 from processors.measure import MeasureProcessor
 from processors.ticks import TickProcessor
-from system_controller import system_summary
-from telemetry_server import TelemetryServer
+from system_controller import PinGuard, SystemController, capture_sessions, session_zip, system_summary
+from telemetry_server import FileDownload, TelemetryServer
 
 
 def ask_to_save_csv():
@@ -39,7 +39,7 @@ def ask_to_save_csv():
         print("請輸入 y（儲存）或 n（不儲存）。")
 
 
-def api_routes(manager, ticks, runtime, align=None):
+def api_routes(manager, ticks, runtime, align=None, controller=None, state=None):
     """(method, path regex, handler(params, body) -> (status, json)) for the web server."""
     def measure_ticks(params, body):
         if manager.mode != "ticks":
@@ -70,15 +70,24 @@ def api_routes(manager, ticks, runtime, align=None):
         ("POST", r"/api/align/teach/(?P<screw>[AB])/(?P<step>start|finish)",
          in_align(lambda params, body: align.teach(params["screw"], params["step"]))),
         ("POST", r"/api/align/complete", in_align(lambda params, body: align.complete())),
-        ("POST", r"/api/align/baseline", in_align(lambda params, body: align.set_baseline(body.get("confirm") is True))),
+        ("POST", r"/api/align/baseline", in_align(lambda params, body: align.set_baseline(body.get("confirm") is True)), True),
     ]
-    return align_routes + [
+    session = r"(?P<session>\d{8}_\d{6}_[0-9a-f]{8})"
+    system_routes = [] if controller is None else [
+        ("GET", r"/api/system/status", lambda params, body: (200, state()["system"])),
+        ("POST", r"/api/system/(?P<action>restart-service|reboot|shutdown)",
+         lambda params, body: controller.request(params["action"]), True),
+        ("GET", r"/api/logs/sessions", lambda params, body: (200, {"sessions": capture_sessions()})),
+        ("GET", rf"/api/logs/sessions/{session}\.zip",
+         lambda params, body: (200, FileDownload(session_zip(params["session"]), f"{params['session']}.zip"))),
+    ]
+    return align_routes + system_routes + [
         ("POST", r"/api/ticks/measure", measure_ticks),
         ("GET", r"/api/ticks/(?P<id>[0-9a-f]{12})", tick_result),
         ("POST", r"/api/ticks/(?P<id>[0-9a-f]{12})/apply",
          lambda params, body: ticks.apply(params["id"], confirm=body.get("confirm") is True)),
         ("GET", rf"/api/calibration/{kinds}", lambda params, body: (200, runtime.history(params["kind"]))),
-        ("POST", rf"/api/calibration/{kinds}/{version}/activate", activate),
+        ("POST", rf"/api/calibration/{kinds}/{version}/activate", activate, True),
     ]
 
 
@@ -115,13 +124,17 @@ def run():
         on_change=lambda mode_state: publish({"type": "state", "schema_version": 1, **mode_state}),
     )
 
+    controller = SystemController(captures)
+    pin = PinGuard()
+
     def service_state():
         return {"type": "state", "schema_version": 1, **manager.state(),
                 "calibration": runtime.status(),
                 "camera": {"open": camera.camera is not None, "open_count": camera.open_count,
                            "frame_id": camera.frame_id,
                            "focus_absolute": getattr(camera.camera, "focus_absolute", None)},
-                "system": system_summary()}
+                "system": {**system_summary(), "storage": captures.storage_estimate(),
+                           "pin_configured": bool(pin.pin), "dry_run": config.SYSTEM_DRY_RUN}}
 
     if config.ENABLE_WEBSOCKET:
         try:
@@ -134,8 +147,9 @@ def run():
                 capture_manager=captures,
                 state_provider=service_state,
                 mode_handler=manager.request,
-                routes=api_routes(manager, ticks, runtime, align),
+                routes=api_routes(manager, ticks, runtime, align, controller, service_state),
                 preview=preview,
+                pin_guard=pin,
             )
             telemetry.start()
             print("WebSocket遙測已啟動：")
@@ -168,7 +182,8 @@ def run():
             print(f"警告：校正檔無法使用（{status['error']}），僅執行YOLO。")
         print("按q或Ctrl+C結束。")
 
-        while not manager.step(camera):
+        # A safe shutdown/reboot request ends the loop between two frames.
+        while not manager.step(camera) and not controller.stop_requested.is_set():
             pass
 
     except KeyboardInterrupt:
@@ -180,6 +195,7 @@ def run():
             ("模式", manager.close),
             ("CSV", logger.close if logger is not None else None),
             ("相機", camera.close),
+            ("系統控制", controller.camera_has_closed),
             ("HTTP/WebSocket", telemetry.stop if telemetry is not None else None),
             ("拍攝 writer", captures.close), ("預覽", close_windows),
         ):

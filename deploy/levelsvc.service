@@ -1,6 +1,6 @@
 # levelsvc: spirit-level measurement service (V2 development: ports 8100/8865).
 #
-# Not installed automatically. Install / start (no boot autostart before P5):
+# Install / start (boot autostart only with `sudo systemctl enable levelsvc`):
 #   sudo cp deploy/levelsvc.service /etc/systemd/system/levelsvc.service
 #   sudo systemctl daemon-reload
 #   sudo systemctl start levelsvc        # stop: sudo systemctl stop levelsvc
@@ -20,6 +20,9 @@ Group=user
 WorkingDirectory=/home/user/my_project_V2/live_yolo1_app
 ExecStart=/home/user/my_project_V2/live_yolo1_app/.venv/bin/python -u main.py
 Environment=PYTHONUNBUFFERED=1
+# LEVELSVC_PIN=<digits> for restart/reboot/shutdown and calibration rollback.
+# Root-only file, never in git:  sudo install -m 0600 /dev/null /etc/levelsvc/env
+EnvironmentFile=-/etc/levelsvc/env
 # SIGINT takes the Ctrl+C path: frozen captures are written, camera closed.
 KillSignal=SIGINT
 TimeoutStopSec=30

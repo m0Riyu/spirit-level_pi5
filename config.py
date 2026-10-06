@@ -1,5 +1,6 @@
 """Application settings and paths."""
 
+import os
 from pathlib import Path
 
 
@@ -78,6 +79,21 @@ ALIGN_PUBLISH_INTERVAL_SECONDS = 0.1  # 10 Hz so the page reacts within 0.5 s
 
 PREVIEW_MAX_FPS = 5
 PREVIEW_JPEG_QUALITY = 60
+
+# ⚙ system control. The PIN comes from /etc/levelsvc/env (EnvironmentFile of
+# the systemd unit), never from git. Commands run through sudoers rules that
+# allow only these three; LEVELSVC_SYSTEM_DRY_RUN=1 logs them instead.
+PIN_ENVIRONMENT_VARIABLE = "LEVELSVC_PIN"
+PIN_MAX_FAILURES = 5
+PIN_LOCKOUT_SECONDS = 60
+SYSTEM_COMMANDS = {
+    "restart-service": ["/usr/bin/systemctl", "restart", "levelsvc"],
+    "reboot": ["/usr/bin/systemctl", "reboot"],
+    "shutdown": ["/usr/bin/systemctl", "poweroff"],
+}
+SYSTEM_DRAIN_TIMEOUT_SECONDS = 10     # wait for captures to finish writing
+SYSTEM_COMMAND_DELAY_SECONDS = 1.0    # let the HTTP response reach the phone first
+SYSTEM_DRY_RUN = os.environ.get("LEVELSVC_SYSTEM_DRY_RUN") == "1"
 
 # Web dashboard and WebSocket telemetry. Open http://<Pi IP>:8100 on a phone
 # connected to the same network. The WebSocket endpoint is ws://<Pi IP>:8865.
