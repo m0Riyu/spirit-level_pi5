@@ -3,8 +3,9 @@
 import time
 
 import config
-from bubble_measurement import BubbleCalibration, BubbleMeasurement
-from camera import capture_roi, close_camera, create_camera
+from bubble_measurement import BubbleMeasurement, check_undistorted_geometry
+from calibration_store import NOMINAL_VIAL, CalibrationStore
+from camera import capture_frames, close_camera, create_camera
 from csv_logger import CsvLogger
 from detector import YoloDetector
 from display import close_windows, show_clean_frame as show_frame
@@ -59,6 +60,19 @@ def ask_to_save_csv():
         print("請輸入 y（儲存）或 n（不儲存）。")
 
 
+def calibration_info(store, geometry, vial):
+    """Versions and vial constants recorded in telemetry and every LOG row."""
+    state = store.summary()
+    return {
+        "geometry_version": geometry.version,
+        "geometry_pending_confirmation": state["geometry"]["pending_confirmation"],
+        "vial_version": vial.version,
+        "alignment_version": state["alignment"]["version"] or "",
+        "mm_per_m_per_div": vial.mm_per_m_per_div,
+        "zero_offset_div": vial.zero_offset_div,
+    }
+
+
 def run():
     detector = YoloDetector()
     stability_tracker = StabilityTracker(
@@ -67,9 +81,20 @@ def run():
         config.STABILITY_HOLD_SECONDS,
     )
     logger = CsvLogger() if config.ENABLE_CONTINUOUS_CSV else None
-    captures = CaptureManager()
+    store = CalibrationStore()
+    geometry = vial = None
+    calibration = {}
+    if config.ENABLE_BUBBLE_MEASUREMENT:
+        try:
+            geometry, vial = store.load_geometry(), store.load_vial()
+            calibration = calibration_info(store, geometry, vial)
+        except (OSError, KeyError, TypeError, ValueError) as error:
+            geometry = vial = None
+            print(f"警告：無法載入校正檔（{store.root}），僅執行YOLO：{error}")
+    captures = CaptureManager(calibration={
+        **calibration, "geometry_source": geometry.source_path if geometry else "",
+        "vial_source": vial.source_path if vial else ""})
     camera = None
-    calibration = None
     telemetry = None
 
     if config.ENABLE_WEBSOCKET:
@@ -97,21 +122,23 @@ def run():
     try:
         camera = create_camera()
         print("相機已啟動。")
-        if config.ENABLE_BUBBLE_MEASUREMENT:
+        if geometry is not None:
             try:
-                calibration = BubbleCalibration.from_json(
-                    config.BUBBLE_CALIBRATION_PATH,
-                    expected_size=(config.ROI_WIDTH, config.ROI_HEIGHT),
-                    undistorter=camera.frame_undistorter,
-                    roi_origin=(config.ROI_X1, config.ROI_Y1),
-                )
+                check_undistorted_geometry(geometry.image_geometry, camera.frame_undistorter,
+                                           (config.ROI_X1, config.ROI_Y1))
+                scale_center = geometry.zero_x_roi()
                 print(
-                    "氣泡量測校正（去畸變座標）已載入："
-                    f"center={calibration.center_x_roi:.3f}px, "
-                    f"center pitch={calibration.pitch_px_per_div:.3f}px/div"
+                    f"幾何校正 {geometry.version}（{geometry.polynomial_degree} 次）："
+                    f"center={scale_center:.3f}px, pitch={geometry.px_per_div(scale_center):.3f}px/div；"
+                    f"水平儀校正 {vial.version}：{vial.mm_per_m_per_div:.5f} mm/m/div，"
+                    f"零點 {vial.zero_offset_div:+.3f} div"
                 )
-            except (OSError, KeyError, TypeError, ValueError) as error:
-                print(f"警告：無法載入氣泡量測校正，僅執行YOLO：{error}")
+                if calibration["geometry_pending_confirmation"]:
+                    print("注意：幾何校正待確認（相機可能動過），請重做刻度檢查。")
+            except (KeyError, TypeError, ValueError) as error:
+                geometry = None
+                calibration = {}
+                print(f"警告：幾何校正與相機參數不符，僅執行YOLO：{error}")
         print("按q或Ctrl+C結束。")
         captures.set_ready()
 
@@ -125,26 +152,23 @@ def run():
             loop_start = time.perf_counter()
 
             capture_start = time.perf_counter()
-            _, bubble_roi = capture_roi(camera)
+            raw_frame, _, bubble_roi = capture_frames(camera)
             capture_ms = (time.perf_counter() - capture_start) * 1000.0
             capture_completed_at_epoch_ms = time.time() * 1000.0
 
             prediction = detector.predict(bubble_roi)
             prediction_completed_at_epoch_ms = time.time() * 1000.0
-            if calibration is None:
+            if geometry is None:
                 measurement = BubbleMeasurement.disabled(
                     "calibration_unavailable"
                     if config.ENABLE_BUBBLE_MEASUREMENT
                     else "measurement_disabled"
                 )
             else:
-                measurement = calibration.measure(
+                measurement = geometry.measure(
                     prediction.detection.center_x_roi
                     if prediction.detection.detected
-                    else None,
-                    prediction.detection.center_y_roi
-                    if prediction.detection.detected
-                    else None,
+                    else None
                 )
 
             plot_ms = 0.0
@@ -164,9 +188,11 @@ def run():
 
             payload = build_telemetry_payload(
                 frame_id, prediction.detection, measurement, timings,
-                mm_per_m_per_div=config.MM_PER_M_PER_DIV,
+                mm_per_m_per_div=(vial or NOMINAL_VIAL).mm_per_m_per_div,
+                zero_offset_div=(vial or NOMINAL_VIAL).zero_offset_div,
                 level_tolerance_mm_per_m=config.LEVEL_TOLERANCE_MM_PER_M,
                 max_measurable_slope_mm_per_m=config.MAX_MEASURABLE_SLOPE_MM_PER_M,
+                calibration=calibration or None,
             )
             stability = stability_tracker.update(
                 payload["measurement"]["valid"], payload["measurement"]["slope_mm_per_m"],
@@ -192,7 +218,7 @@ def run():
                     timings, payload, stability, frame_started_epoch_ms=frame_started_at_epoch_ms,
                     capture_completed_epoch_ms=capture_completed_at_epoch_ms,
                     prediction_completed_epoch_ms=prediction_completed_at_epoch_ms,
-                    frame_completed_monotonic=time.monotonic(),
+                    frame_completed_monotonic=time.monotonic(), raw_frame=raw_frame,
                 )
 
             if (

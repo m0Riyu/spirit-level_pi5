@@ -1,4 +1,5 @@
-/* Numeric phone logs stay on this browser. Only request_id is POSTed to Pi. */
+/* Numeric phone logs stay on this browser. POST carries request_id plus the
+   operator's capture options (reference values, sweep, note, burst frames). */
 "use strict";
 (() => {
   const PHONE_LOG_FIELDS = (
@@ -10,8 +11,19 @@
     "latest_telemetry_sent_at_epoch_ms latest_telemetry_received_at_epoch_ms " +
     "message_rate_hz_at_press data_latency_median_ms_at_press total_latency_median_ms_at_press " +
     "inference_median_ms_at_press clock_offset_ms_at_press " +
-    "trigger_ack_ms button_to_saved_response_ms status_poll_count"
+    "trigger_ack_ms button_to_saved_response_ms status_poll_count " +
+    "reference_deg a_axis_deg sweep_direction note burst_frames"
   ).split(" ");
+  const CAPTURE_OPTION_FIELDS = ["reference_deg", "a_axis_deg", "sweep_direction", "note", "burst_frames"];
+
+  // Retries and reload recovery rebuild the identical body from the stored row.
+  function captureBody(row) {
+    const body = { request_id: row.request_id };
+    for (const name of CAPTURE_OPTION_FIELDS) {
+      if (row[name] !== null && row[name] !== undefined && row[name] !== "") body[name] = row[name];
+    }
+    return body;
+  }
   const TERMINAL = new Set(["saved", "rejected", "error"]);
 
   function taipeiIso(epochMs = Date.now()) {
@@ -97,8 +109,10 @@
   }
 
   class PhoneCaptureController {
-    constructor({ snapshot, ui, store = new PhoneLogStore(), pollMs = 900, fetcher = window.fetch.bind(window) }) {
+    constructor({ snapshot, ui, store = new PhoneLogStore(), pollMs = 900, fetcher = window.fetch.bind(window),
+                  options = () => ({}) }) {
       this.snapshot = snapshot;
+      this.options = options;
       this.ui = ui;
       this.store = store;
       this.pollMs = pollMs;
@@ -140,6 +154,7 @@
         const response = await this.fetchJson("/api/captures/ready");
         this.httpReady = response.ok && response.data.ready === true;
         if (response.ok) this.requireStable = response.data.require_stable_for_capture === true;
+        if (response.ok && this.ui.storage) this.renderStorage(response.data.storage);
       } catch { this.httpReady = false; }
       this.updateButton();
     }
@@ -151,6 +166,12 @@
         (this.requireStable ? "必須等待氣泡穩定才能記錄。" : "氣泡尚未穩定；仍可記錄，Pi LOG 將保存當下狀態。");
       if (this.ui.warning) this.ui.warning.textContent = warning;
       this.ui.button.title = [warning, this.statusMessage].filter(Boolean).join("\n");
+    }
+    renderStorage(storage) {
+      if (!storage || storage.disk_free_mb == null) { this.ui.storage.textContent = "剩餘空間：—"; return; }
+      const megabytes = Number(storage.bytes_per_capture) / 1024 ** 2;
+      this.ui.storage.textContent = `剩餘空間 ${(storage.disk_free_mb / 1024).toFixed(1)} GB · ` +
+        `每次記錄約 ${megabytes.toFixed(1)} MB · 約可再記錄 ${storage.estimated_remaining_captures} 次`;
     }
     notify(message, error = false) {
       this.statusMessage = message;
@@ -180,13 +201,16 @@
     }
     async press() {
       if (this.ui.button.disabled || this.pressing || this.running.size) return;
+      let options;
+      try { options = this.options(); }
+      catch (error) { this.notify(`無法記錄：${error.message}`, true); return; }
       // Freeze numeric metrics synchronously at the press, before any await/POST.
       this.pressing = true;
       const epoch = Date.now();
       const pressedPerf = performance.now();
       const snapshot = this.snapshot();
       const row = Object.fromEntries(PHONE_LOG_FIELDS.map((name) => [name, null]));
-      Object.assign(row, snapshot.fields, {
+      Object.assign(row, snapshot.fields, options, {
         request_id: uuid(), status: "pending", status_poll_count: 0,
         client_pressed_at_iso: taipeiIso(epoch), client_pressed_at_epoch_ms: epoch,
         // Internal-only timing fields, not exported or transmitted.
@@ -230,7 +254,7 @@
             if (post) {
               response = await this.fetchJson("/api/captures", {
                 method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ request_id: row.request_id }),
+                body: JSON.stringify(captureBody(row)),
               });
               post = false;
               if (response.ok) {
@@ -290,7 +314,8 @@
       }
       await this.updateRow(row.request_id, changes);
       await this.refreshCounts();
-      this.notify(response.status === "saved" ? `保存成功：${response.record_id}` :
+      const reference = row.reference_deg == null ? "未填參考值" : `參考 ${row.reference_deg}°`;
+      this.notify(response.status === "saved" ? `保存成功：${response.record_id} · ${reference}` :
         `拍攝${response.status === "rejected" ? "被拒絕" : "失敗"}：${response.error_code} · ${response.message}`, response.status !== "saved");
     }
     async export() {
@@ -312,5 +337,6 @@
       finally { this.ui.export.disabled = false; }
     }
   }
-  window.CaptureLog = { PHONE_LOG_FIELDS, PhoneLogStore, PhoneCaptureController, phoneCsv, taipeiIso, uuid };
+  window.CaptureLog = { PHONE_LOG_FIELDS, CAPTURE_OPTION_FIELDS, PhoneLogStore, PhoneCaptureController,
+    captureBody, phoneCsv, taipeiIso, uuid };
 })();

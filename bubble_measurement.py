@@ -8,6 +8,29 @@ from pathlib import Path
 import numpy as np
 
 
+def check_undistorted_geometry(geometry, undistorter, roi_origin):
+    """Reject a rectified-ROI calibration made with another camera geometry."""
+    if geometry.get("coordinate_system") != "undistorted":
+        raise ValueError("calibration is not in undistorted ROI coordinates")
+    expected_geometry = {
+        "frame_size": undistorter.image_size,
+        "roi_origin": roi_origin,
+        "original_camera_matrix": undistorter.original_camera_matrix,
+        "dist_coeffs": undistorter.distortion.reshape(-1),
+        "new_camera_matrix": undistorter.camera_matrix,
+    }
+    for name, expected in expected_geometry.items():
+        if name not in geometry:
+            raise ValueError(f"undistorted calibration is missing {name}")
+        recorded = np.asarray(geometry[name], dtype=float)
+        expected = np.asarray(expected, dtype=float)
+        if name == "dist_coeffs":
+            recorded = recorded.reshape(-1)
+        if (recorded.shape != expected.shape
+                or not np.allclose(recorded, expected, rtol=1e-8, atol=1e-8)):
+            raise ValueError(f"undistorted calibration {name} differs from runtime geometry")
+
+
 @dataclass(frozen=True)
 class BubbleCalibration:
     center_x_roi: float
@@ -69,21 +92,7 @@ class BubbleCalibration:
         if coordinate_system == "undistorted":
             # Tuner measurements are already in the rectified ROI. Validate
             # their geometry and use their measured center/pitch directly.
-            expected_geometry = {
-                "frame_size": undistorter.image_size,
-                "roi_origin": roi_origin,
-                "original_camera_matrix": undistorter.original_camera_matrix,
-                "dist_coeffs": undistorter.distortion.reshape(-1),
-                "new_camera_matrix": undistorter.camera_matrix,
-            }
-            for name, expected in expected_geometry.items():
-                recorded = np.asarray(geometry[name], dtype=float)
-                expected = np.asarray(expected, dtype=float)
-                if name == "dist_coeffs":
-                    recorded = recorded.reshape(-1)
-                if (recorded.shape != expected.shape
-                        or not np.allclose(recorded, expected, rtol=1e-8, atol=1e-8)):
-                    raise ValueError(f"undistorted calibration {name} differs from runtime geometry")
+            check_undistorted_geometry(geometry, undistorter, roi_origin)
             return calibration
         if coordinate_system != "original":
             raise ValueError(f"unsupported calibration coordinate system: {coordinate_system}")

@@ -10,7 +10,7 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from manual_capture import valid_request_id
+from manual_capture import parse_capture_options, valid_request_id
 from stability import finite_number
 
 
@@ -23,8 +23,14 @@ def build_telemetry_payload(
     mm_per_m_per_div,
     level_tolerance_mm_per_m,
     max_measurable_slope_mm_per_m,
+    zero_offset_div=0.0,
+    calibration=None,
 ):
-    """Build the versioned JSON message sent to dashboard clients."""
+    """Build the versioned JSON message sent to dashboard clients.
+
+    offset_div keeps its meaning (geometric divisions from the scale center);
+    slope applies the vial calibration: (offset_div - zero) * mm_per_m_per_div.
+    """
     valid = bool(detection.detected and measurement.valid and all(
         finite_number(value) is not None for value in (
             measurement.offset_px, measurement.offset_div, measurement.center_x_roi,
@@ -38,7 +44,7 @@ def build_telemetry_payload(
         pixels_per_1_mmm = pixels_per_div / float(mm_per_m_per_div)
         # Rectification makes spacing nonlinear; calibrated divisions already
         # account for that geometry and are shared with the CSV/preview.
-        slope_mm_per_m = float(measurement.offset_div) * float(mm_per_m_per_div)
+        slope_mm_per_m = (float(measurement.offset_div) - float(zero_offset_div)) * float(mm_per_m_per_div)
         angle_degrees = math.degrees(math.atan(slope_mm_per_m / 1000.0))
         absolute_slope = abs(slope_mm_per_m)
         maximum_slope = float(max_measurable_slope_mm_per_m)
@@ -64,7 +70,7 @@ def build_telemetry_payload(
         within_official_range = False
         system_state = "SEARCHING" if not detection.detected else "ERROR"
 
-    return {
+    payload = {
         "type": "telemetry",
         "schema_version": 1,
         "frame_id": int(frame_id),
@@ -105,6 +111,9 @@ def build_telemetry_payload(
             "fps": float(timings["fps"]),
         },
     }
+    if calibration is not None:
+        payload["calibration"] = dict(calibration)
+    return payload
 
 
 class _NoCacheRequestHandler(SimpleHTTPRequestHandler):
@@ -131,23 +140,28 @@ class _NoCacheRequestHandler(SimpleHTTPRequestHandler):
             return
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            if not 0 < length <= 1024:
-                raise ValueError("JSON body must be between 1 and 1024 bytes")
+            if not 0 < length <= 2048:
+                raise ValueError("JSON body must be between 1 and 2048 bytes")
             self.connection.settimeout(5)
             payload = json.loads(self.rfile.read(length))
-            if not isinstance(payload, dict) or set(payload) != {"request_id"}:
-                raise ValueError("send only request_id")
+            if not isinstance(payload, dict) or "request_id" not in payload:
+                raise ValueError("request_id is required")
         except (ValueError, UnicodeError, OSError) as error:
             self._json(400, {"status": "error", "error_code": "INVALID_JSON", "message": str(error)})
             return
         if not valid_request_id(payload["request_id"]):
             self._json(400, {"status": "error", "error_code": "INVALID_REQUEST_ID", "message": "request_id must be a UUID"})
             return
+        try:
+            options = parse_capture_options(payload)
+        except ValueError as error:
+            self._json(400, {"status": "error", "error_code": "INVALID_CAPTURE_OPTIONS", "message": str(error)})
+            return
         if self.capture_manager is None:
             self._json(503, {"status": "error", "error_code": "SERVER_NOT_READY", "message": "capture service unavailable"})
             return
         try:
-            status, response = self.capture_manager.submit(payload["request_id"])
+            status, response = self.capture_manager.submit(payload["request_id"], options)
             self._json(status, response)
         except Exception:
             import logging
@@ -157,8 +171,12 @@ class _NoCacheRequestHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if path == "/api/captures/ready":
-            self._json(200, {"ready": self.capture_manager is not None and self.capture_manager.ready,
-                             "require_stable_for_capture": bool(self.capture_manager and self.capture_manager.require_stable)})
+            response = {"ready": self.capture_manager is not None and self.capture_manager.ready,
+                        "require_stable_for_capture": bool(self.capture_manager and self.capture_manager.require_stable)}
+            if self.capture_manager is not None:
+                response["burst_frames_default"] = self.capture_manager.default_burst_frames
+                response["storage"] = self.capture_manager.storage_estimate()
+            self._json(200, response)
             return
         if path.startswith("/api/captures/"):
             request_id = path[len("/api/captures/"):]

@@ -10,6 +10,7 @@ import errno
 import io
 import json
 import logging
+import math
 import os
 import platform
 import queue
@@ -20,12 +21,13 @@ import subprocess
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import cv2
+import numpy as np
 
 import config
 from display import annotate_capture_roi
@@ -53,8 +55,24 @@ PI_LOG_FIELDS = (
     "request_to_frame_ms request_to_saved_ms "
     "cpu_temperature_c load_average_1m disk_free_mb "
     "clean_image_path annotated_image_path clean_image_width clean_image_height "
-    "annotated_image_width annotated_image_height"
+    "annotated_image_width annotated_image_height "
+    # V2: burst rows, field reference values, raw frame and calibration versions.
+    "row_type burst_id burst_index burst_size "
+    "reference_deg a_axis_deg sweep_direction note "
+    "raw_image_path raw_frame_id "
+    "geometry_version geometry_pending_confirmation vial_version alignment_version "
+    "mm_per_m_per_div zero_offset_div "
+    "burst_valid_count burst_median_slope_mm_per_m burst_std_slope_mm_per_m "
+    "burst_median_angle_degrees burst_std_angle_degrees "
+    "burst_median_offset_div burst_std_offset_div "
+    "burst_median_center_x_roi burst_std_center_x_roi"
 ).split()
+CAPTURE_OPTION_FIELDS = ("reference_deg", "a_axis_deg", "sweep_direction", "note", "burst_frames")
+SWEEP_DIRECTIONS = ("forward", "backward", "zero_check")
+CALIBRATION_ROW_FIELDS = ("geometry_version", "geometry_pending_confirmation", "vial_version",
+                          "alignment_version", "mm_per_m_per_div", "zero_offset_div")
+BURST_SUMMARY_FIELDS = (("slope_mm_per_m", "slope_mm_per_m"), ("angle_degrees", "angle_degrees"),
+                        ("offset_div", "bubble_offset_div"), ("center_x_roi", "center_x_roi"))
 TERMINAL_STATES = {"saved", "rejected", "error"}
 SAVED_RESPONSE_FIELDS = ("status", "request_id", "session_id", "sample_id",
                          "record_id", "frame_id", "saved_at_epoch_ms")
@@ -75,6 +93,50 @@ def valid_request_id(value):
         return False
 
 
+def parse_capture_options(payload):
+    """Validate the optional field-test values sent with one trigger."""
+    unknown = set(payload) - {"request_id", *CAPTURE_OPTION_FIELDS}
+    if unknown:
+        raise ValueError("unknown fields: " + ", ".join(sorted(unknown)))
+    options = {}
+    for name in ("reference_deg", "a_axis_deg"):
+        value = payload.get(name)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or abs(value) > 90:
+            raise ValueError(f"{name} must be a finite angle in degrees")
+        options[name] = float(value)
+    direction = payload.get("sweep_direction")
+    if direction not in (None, ""):
+        if direction not in SWEEP_DIRECTIONS:
+            raise ValueError("sweep_direction must be forward, backward or zero_check")
+        options["sweep_direction"] = direction
+    note = payload.get("note")
+    if note not in (None, ""):
+        if not isinstance(note, str) or len(note) > 200:
+            raise ValueError("note must be text of at most 200 characters")
+        options["note"] = " ".join(note.split())
+    frames = payload.get("burst_frames")
+    if frames is not None:
+        if (isinstance(frames, bool) or not isinstance(frames, int)
+                or not 1 <= frames <= config.CAPTURE_BURST_MAX_FRAMES):
+            raise ValueError(f"burst_frames must be an integer from 1 to {config.CAPTURE_BURST_MAX_FRAMES}")
+        options["burst_frames"] = frames
+    return options
+
+
+def burst_summary(frame_rows):
+    """Median and population standard deviation over the burst's valid frames."""
+    valid = [row for row in frame_rows if row.get("measurement_valid") is True
+             and finite_number(row.get("slope_mm_per_m")) is not None]
+    summary = {"burst_valid_count": len(valid)}
+    for name, source in BURST_SUMMARY_FIELDS:
+        values = np.array([float(row[source]) for row in valid if finite_number(row.get(source)) is not None])
+        summary[f"burst_median_{name}"] = float(np.median(values)) if values.size else ""
+        summary[f"burst_std_{name}"] = float(np.std(values)) if values.size else ""
+    return summary
+
+
 def git_value(*arguments):
     try:
         return subprocess.run(["git", *arguments], cwd=config.APP_DIRECTORY,
@@ -83,7 +145,8 @@ def git_value(*arguments):
         return "unknown"
 
 
-def session_metadata(session_id):
+def session_metadata(session_id, calibration=None):
+    calibration = dict(calibration or {})
     return {
         "schema_version": 1, "session_id": session_id, "started_at_iso": wall_time()[0],
         "log_timezone": "Asia/Taipei",
@@ -95,9 +158,11 @@ def session_metadata(session_id):
         "roi_x1": config.ROI_X1, "roi_y1": config.ROI_Y1,
         "roi_x2": config.ROI_X2, "roi_y2": config.ROI_Y2,
         "confidence_threshold": config.CONFIDENCE_THRESHOLD,
-        "calibration_source": str(config.BUBBLE_CALIBRATION_PATH),
+        "calibration_source": calibration.get("geometry_source", ""),
         "camera_calibration_source": str(config.CAMERA_CALIBRATION_NPZ),
-        "mm_per_m_per_div": config.MM_PER_M_PER_DIV,
+        "mm_per_m_per_div": calibration.get("mm_per_m_per_div"),
+        "zero_offset_div": calibration.get("zero_offset_div"),
+        "calibration": calibration,
         "level_tolerance_mm_per_m": config.LEVEL_TOLERANCE_MM_PER_M,
         "max_measurable_slope_mm_per_m": config.MAX_MEASURABLE_SLOPE_MM_PER_M,
         "stability_window_size": config.STABILITY_WINDOW_SIZE,
@@ -109,6 +174,8 @@ def session_metadata(session_id):
         "continuous_csv_enabled": config.ENABLE_CONTINUOUS_CSV,
         "image_stream_enabled": config.ENABLE_IMAGE_STREAM,
         "websocket_image_stream_enabled": False, "jpeg_quality": config.JPEG_QUALITY,
+        "capture_burst_frames_default": config.CAPTURE_BURST_FRAMES,
+        "save_raw_frame_png": config.SAVE_RAW_FRAME_PNG, "raw_png_compression": config.RAW_PNG_COMPRESSION,
     }
 
 
@@ -119,13 +186,27 @@ class CaptureRequest:
     received_iso: str
     received_epoch_ms: float
     accepted_monotonic: float = 0.
+    options: dict = field(default_factory=dict)
+
+
+@dataclass
+class Burst:
+    """Consecutive frames collected for one trigger before a single writer job."""
+    request: CaptureRequest
+    sample_id: int
+    record_id: str
+    size: int
+    frames: list = field(default_factory=list)  # (clean ROI copy, CSV row)
+    raw_frame: object = None
+    raw_frame_id: object = ""
 
 
 @dataclass
 class CaptureJob:
     request: CaptureRequest
-    clean_roi: object
-    row: dict
+    frames: list
+    raw_frame: object = None
+    summary_row: dict = None
 
 
 class CaptureFailure(Exception):
@@ -136,7 +217,7 @@ class CaptureFailure(Exception):
 
 class CaptureManager:
     def __init__(self, root=None, *, request_queue_size=None, writer_queue_size=None,
-                 max_active=None, require_stable=None):
+                 max_active=None, require_stable=None, default_burst_frames=None, calibration=None):
         self.root = Path(root) if root is not None else config.LOG_DIRECTORY / "manual_captures"
         self.root.mkdir(parents=True, exist_ok=True)
         self.session_id = datetime.now(LOG_TIMEZONE).strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:8]
@@ -149,6 +230,10 @@ class CaptureManager:
         self._ready = False
         self._closed = False
         self._sample_id = 0
+        self._bursts = {}  # request_id -> Burst still collecting frames.
+        self._saved_bytes = 0
+        self._saved_captures = 0
+        self.default_burst_frames = int(default_burst_frames or config.CAPTURE_BURST_FRAMES)
         self.max_active = max_active if max_active is not None else config.CAPTURE_MAX_ACTIVE_REQUESTS
         self.require_stable = require_stable if require_stable is not None else config.REQUIRE_STABLE_FOR_CAPTURE
         self.requests = queue.Queue(maxsize=request_queue_size if request_queue_size is not None else config.CAPTURE_REQUEST_QUEUE_SIZE)
@@ -159,7 +244,7 @@ class CaptureManager:
         self._database.execute("PRAGMA synchronous=FULL")
         self._database.execute("CREATE TABLE IF NOT EXISTS requests (request_id TEXT PRIMARY KEY, session_id TEXT, response TEXT)")
         self._recover_interrupted()
-        metadata = session_metadata(self.session_id)
+        metadata = session_metadata(self.session_id, calibration)
         metadata_path = self.session_directory / "session_metadata.json"
         with metadata_path.open("x", encoding="utf-8") as file:
             json.dump(metadata, file, ensure_ascii=False, indent=2, allow_nan=False)
@@ -216,7 +301,7 @@ class CaptureManager:
             row = self._database.execute("SELECT response FROM requests WHERE request_id=?", (request_id,)).fetchone()
             return json.loads(row[0]) if row else None
 
-    def submit(self, request_id):
+    def submit(self, request_id, options=None):
         if not valid_request_id(request_id):
             return 400, {"status": "error", "error_code": "INVALID_REQUEST_ID", "message": "request_id must be a UUID"}
         request_id = request_id.lower()
@@ -241,7 +326,7 @@ class CaptureManager:
                 return 409, {"status": "error", "request_id": request_id,
                              "error_code": "CAPTURE_BUSY", "message": "maximum captures already in progress"}
             iso, epoch = wall_time()
-            request = CaptureRequest(request_id, time.monotonic(), iso, epoch)
+            request = CaptureRequest(request_id, time.monotonic(), iso, epoch, options=dict(options or {}))
             response = {"status": "pending", "request_id": request_id}
             self._persist(response)
             self._active[request_id] = response
@@ -253,9 +338,10 @@ class CaptureManager:
 
         Requests arriving during capture/prediction wait for the next iteration.
         The lock defines the cutoff; no cached frame can satisfy a new request.
+        Bursts already collecting frames also take this frame.
         """
-        accepted = []
         with self._lock:
+            accepted = [burst.request for burst in self._bursts.values()]
             while not self.requests.empty():
                 request = self.requests.get_nowait()
                 request.accepted_monotonic = time.monotonic()
@@ -267,55 +353,96 @@ class CaptureManager:
     def freeze_frame(self, requests, bubble_roi, frame_id, detection, measurement,
                      timings, payload, stability, *, frame_started_epoch_ms,
                      capture_completed_epoch_ms, prediction_completed_epoch_ms,
-                     frame_completed_monotonic):
+                     frame_completed_monotonic, raw_frame=None):
         for request in requests:
             try:
-                if self.require_stable and not stability.stable:
-                    self._finish_error(request, "NOT_STABLE", "bubble is not stable", rejected=True)
-                    continue
+                burst = self._bursts.get(request.request_id)
+                if burst is None:
+                    # Stability gates the trigger once, at the burst's first frame.
+                    if self.require_stable and not stability.stable:
+                        self._finish_error(request, "NOT_STABLE", "bubble is not stable", rejected=True)
+                        continue
+                    self._sample_id += 1
+                    burst = Burst(request, self._sample_id, f"{self.session_id}_{self._sample_id:06d}",
+                                  request.options.get("burst_frames", self.default_burst_frames))
+                    with self._lock:
+                        self._bursts[request.request_id] = burst
                 if bubble_roi.shape != (config.ROI_HEIGHT, config.ROI_WIDTH, 3):
                     raise CaptureFailure("ROI_SIZE_INVALID", "ROI must be 740x160 with three channels")
-                self._sample_id += 1
-                record_id = f"{self.session_id}_{self._sample_id:06d}"
-                row = {"session_id": self.session_id, "sample_id": self._sample_id,
-                       "record_id": record_id, "request_id": request.request_id, "frame_id": frame_id,
-                       "request_received_at_iso": request.received_iso,
-                       "request_received_at_epoch_ms": request.received_epoch_ms}
-                for name, epoch in (("frame_started", frame_started_epoch_ms),
-                                    ("capture_completed", capture_completed_epoch_ms),
-                                    ("prediction_completed", prediction_completed_epoch_ms)):
-                    row[f"{name}_at_iso"], row[f"{name}_at_epoch_ms"] = wall_time(epoch)
-                row.update(detection.as_dict())
-                if not detection.detected:
-                    for name in ("class_id", "class_name", "confidence", "x1_roi", "y1_roi", "x2_roi", "y2_roi",
-                                 "center_x_roi", "center_y_roi", "box_width", "box_height"):
-                        row[name] = ""
-                row.update(measurement.as_dict())
-                row["measurement_valid"] = payload["measurement"]["valid"]
-                row["measurement_error"] = payload["measurement"]["error"]
-                row.update({"slope_mm_per_m": payload["measurement"]["slope_mm_per_m"],
-                            "angle_degrees": payload["measurement"]["angle_degrees"],
-                            "within_official_range": payload["measurement"]["within_official_range"],
-                            "system_state": payload["system_state"]})
-                row.update(timings)
-                for name, value in stability.as_dict().items():
-                    key = "stability_duration_seconds" if name == "stable_duration_seconds" else f"stability_{name}"
-                    row[key] = value
-                row["queue_wait_ms"] = (request.accepted_monotonic - request.received_monotonic) * 1000
-                row["request_to_frame_ms"] = (frame_completed_monotonic - request.received_monotonic) * 1000
+                if not burst.frames and raw_frame is not None and config.SAVE_RAW_FRAME_PNG:
+                    burst.raw_frame, burst.raw_frame_id = raw_frame.copy(), frame_id
+                row = self._frame_row(burst, frame_id, detection, measurement, timings, payload, stability,
+                                      frame_started_epoch_ms, capture_completed_epoch_ms,
+                                      prediction_completed_epoch_ms, frame_completed_monotonic)
                 # Only the trigger path copies pixels. Never retain result/full_frame.
-                clean_roi = bubble_roi.copy()
-                self.jobs.put_nowait(CaptureJob(request, clean_roi, row))
+                burst.frames.append((bubble_roi.copy(), row))
+                if len(burst.frames) < burst.size:
+                    continue
+                with self._lock:
+                    self._bursts.pop(request.request_id, None)
+                summary = self._summary_row(burst) if burst.size > 1 else None
+                self.jobs.put_nowait(CaptureJob(request, burst.frames, burst.raw_frame, summary))
             except queue.Full:
                 self._finish_error(request, "WRITER_QUEUE_FULL", "capture writer queue is full")
             except Exception as error:
                 self._finish_error(request, getattr(error, "code", "CAPTURE_FAILED"), str(error))
+
+    def _burst_identity(self, burst):
+        request = burst.request
+        row = {"session_id": self.session_id, "sample_id": burst.sample_id,
+               "record_id": burst.record_id, "request_id": request.request_id,
+               "request_received_at_iso": request.received_iso,
+               "request_received_at_epoch_ms": request.received_epoch_ms,
+               "burst_id": burst.record_id, "burst_size": burst.size, "raw_frame_id": burst.raw_frame_id}
+        row.update({name: request.options.get(name, "") for name in CAPTURE_OPTION_FIELDS if name != "burst_frames"})
+        return row
+
+    def _frame_row(self, burst, frame_id, detection, measurement, timings, payload, stability,
+                   frame_started_epoch_ms, capture_completed_epoch_ms, prediction_completed_epoch_ms,
+                   frame_completed_monotonic):
+        request = burst.request
+        row = self._burst_identity(burst)
+        row.update(row_type="frame", burst_index=len(burst.frames) + 1, frame_id=frame_id)
+        for name, epoch in (("frame_started", frame_started_epoch_ms),
+                            ("capture_completed", capture_completed_epoch_ms),
+                            ("prediction_completed", prediction_completed_epoch_ms)):
+            row[f"{name}_at_iso"], row[f"{name}_at_epoch_ms"] = wall_time(epoch)
+        row.update(detection.as_dict())
+        if not detection.detected:
+            for name in ("class_id", "class_name", "confidence", "x1_roi", "y1_roi", "x2_roi", "y2_roi",
+                         "center_x_roi", "center_y_roi", "box_width", "box_height"):
+                row[name] = ""
+        row.update(measurement.as_dict())
+        row["measurement_valid"] = payload["measurement"]["valid"]
+        row["measurement_error"] = payload["measurement"]["error"]
+        row.update({"slope_mm_per_m": payload["measurement"]["slope_mm_per_m"],
+                    "angle_degrees": payload["measurement"]["angle_degrees"],
+                    "within_official_range": payload["measurement"]["within_official_range"],
+                    "system_state": payload["system_state"]})
+        calibration = payload.get("calibration") or {}
+        row.update({name: calibration.get(name, "") for name in CALIBRATION_ROW_FIELDS})
+        row.update(timings)
+        for name, value in stability.as_dict().items():
+            key = "stability_duration_seconds" if name == "stable_duration_seconds" else f"stability_{name}"
+            row[key] = value
+        row["queue_wait_ms"] = (request.accepted_monotonic - request.received_monotonic) * 1000
+        row["request_to_frame_ms"] = (frame_completed_monotonic - request.received_monotonic) * 1000
+        return row
+
+    def _summary_row(self, burst):
+        frame_rows = [row for _, row in burst.frames]
+        row = self._burst_identity(burst)
+        row.update(row_type="summary")
+        row.update({name: frame_rows[0].get(name, "") for name in CALIBRATION_ROW_FIELDS})
+        row.update(burst_summary(frame_rows))
+        return row
 
     def _finish_error(self, request, code, message, *, rejected=False):
         response = {"status": "rejected" if rejected else "error", "request_id": request.request_id,
                     "error_code": code, "message": message}
         LOG.error("Capture %s: %s: %s", request.request_id, code, message)
         with self._lock:
+            self._bursts.pop(request.request_id, None)
             self._active[request.request_id] = response
             try:
                 self._persist(response)
@@ -359,12 +486,15 @@ class CaptureManager:
         return result
 
     def _write_image(self, path, image):
+        kind = "PNG" if path.suffix == ".png" else "JPEG"
+        parameters = ([cv2.IMWRITE_PNG_COMPRESSION, config.RAW_PNG_COMPRESSION] if kind == "PNG"
+                      else [cv2.IMWRITE_JPEG_QUALITY, config.JPEG_QUALITY])
         try:
-            encoded, data = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, config.JPEG_QUALITY])
+            encoded, data = cv2.imencode(path.suffix, image, parameters)
         except cv2.error as error:
-            raise CaptureFailure("JPEG_ENCODE_FAILED", "ROI JPEG encoding failed") from error
+            raise CaptureFailure(f"{kind}_ENCODE_FAILED", f"{path.suffix} encoding failed") from error
         if not encoded:
-            raise CaptureFailure("JPEG_ENCODE_FAILED", "ROI JPEG encoding failed")
+            raise CaptureFailure(f"{kind}_ENCODE_FAILED", f"{path.suffix} encoding failed")
         try:
             with path.open("xb") as file:
                 file.write(data.tobytes())
@@ -384,31 +514,41 @@ class CaptureManager:
         csv.DictWriter(buffer, PI_LOG_FIELDS).writerow(values)
         return buffer.getvalue().encode("utf-8")
 
-    def _append_csv(self, row, request):
-        # One serialized writer. Roll back just this row on any CSV failure.
+    def _append_csv(self, rows, request):
+        # One serialized writer. Roll back the whole burst on any CSV failure.
         # Measure a real append+flush+fsync, then finalize its own diagnostic
         # timing fields. csv_write_ms excludes that second diagnostic rewrite.
+        def stamp():
+            saved = wall_time()
+            elapsed = (time.monotonic() - request.received_monotonic) * 1000
+            for row in rows:
+                row["saved_at_iso"], row["saved_at_epoch_ms"] = saved
+                row["request_to_saved_ms"] = elapsed
+
         with self.csv_path.open("r+b") as file:
             file.seek(0, os.SEEK_END)
             position = file.tell()
             start = time.monotonic()
             try:
-                row["csv_write_ms"] = 0.
-                row["saved_at_iso"], row["saved_at_epoch_ms"] = wall_time()
-                row["request_to_saved_ms"] = (time.monotonic() - request.received_monotonic) * 1000
-                file.write(self._csv_line(row))
+                for row in rows:
+                    row["csv_write_ms"] = 0.
+                stamp()
+                file.write(b"".join(self._csv_line(row) for row in rows))
                 file.flush()
                 os.fsync(file.fileno())
-                row["csv_write_ms"] = (time.monotonic() - start) * 1000
+                csv_write_ms = (time.monotonic() - start) * 1000
+                for row in rows:
+                    row["csv_write_ms"] = csv_write_ms
                 # Timestamp of durable image+CSV completion; state becomes
                 # saved only after these diagnostic fields are also durable.
-                row["saved_at_iso"], row["saved_at_epoch_ms"] = wall_time()
-                row["request_to_saved_ms"] = (time.monotonic() - request.received_monotonic) * 1000
+                stamp()
                 file.seek(position)
-                file.write(self._csv_line(row))
+                data = b"".join(self._csv_line(row) for row in rows)
+                file.write(data)
                 file.truncate()
                 file.flush()
                 os.fsync(file.fileno())
+                return len(data)
             except Exception:
                 file.seek(position)
                 file.truncate()
@@ -417,49 +557,82 @@ class CaptureManager:
                 raise
 
     def _save(self, job):
-        row, request = job.row, job.request
-        stem = row["record_id"]
-        finals = [self.images_directory / f"{stem}_{name}.jpg" for name in ("clean", "annotated")]
-        temporary = [path.with_name(path.stem + ".tmp.jpg") for path in finals]
-        start = time.monotonic()
-        annotated = annotate_capture_roi(job.clean_roi, row)
-        row["annotation_ms"] = (time.monotonic() - start) * 1000
-        row.update(self._system_snapshot())
-        for name, path in zip(("clean", "annotated"), finals):
-            row[f"{name}_image_path"] = str(path.relative_to(self.session_directory))
-            row[f"{name}_image_width"] = job.clean_roi.shape[1]
-            row[f"{name}_image_height"] = job.clean_roi.shape[0]
+        request = job.request
+        frame_rows = [row for _, row in job.frames]
+        rows = frame_rows + ([job.summary_row] if job.summary_row is not None else [])
+        images = []  # (final path, image)
+        for clean_roi, row in job.frames:
+            start = time.monotonic()
+            annotated = annotate_capture_roi(clean_roi, row)
+            row["annotation_ms"] = (time.monotonic() - start) * 1000
+            stem = f"{row['record_id']}_{row['burst_index']:02d}"
+            for name, image in (("clean", clean_roi), ("annotated", annotated)):
+                path = self.images_directory / f"{stem}_{name}.jpg"
+                images.append((path, image))
+                row[f"{name}_image_path"] = str(path.relative_to(self.session_directory))
+                row[f"{name}_image_width"] = image.shape[1]
+                row[f"{name}_image_height"] = image.shape[0]
+        raw_path = ""
+        if job.raw_frame is not None:
+            path = self.images_directory / f"{frame_rows[0]['record_id']}_raw.png"
+            images.append((path, job.raw_frame))
+            raw_path = str(path.relative_to(self.session_directory))
+        system = self._system_snapshot()
+        for row in rows:
+            row["raw_image_path"] = raw_path
+        for row in frame_rows:
+            row.update(system)
+        finals = [path for path, _ in images]
+        temporary = [path.with_name(path.stem + ".tmp" + path.suffix) for path in finals]
         csv_committed = False
         try:
             start = time.monotonic()
-            self._write_image(temporary[0], job.clean_roi)
-            self._write_image(temporary[1], annotated)
+            for path, (_, image) in zip(temporary, images):
+                self._write_image(path, image)
             for source, destination in zip(temporary, finals):
                 os.replace(source, destination)
+            written = sum(path.stat().st_size for path in finals)
             directory_fd = os.open(self.images_directory, os.O_RDONLY | os.O_DIRECTORY)
             try:
                 os.fsync(directory_fd)
             finally:
                 os.close(directory_fd)
-            row["image_write_ms"] = (time.monotonic() - start) * 1000
+            for row in frame_rows:
+                row["image_write_ms"] = (time.monotonic() - start) * 1000
             try:
-                self._append_csv(row, request)
+                written += self._append_csv(rows, request)
             except Exception as error:
                 code = "DISK_FULL" if getattr(error, "errno", None) == errno.ENOSPC else "CSV_WRITE_FAILED"
                 raise CaptureFailure(code, "Pi CSV row could not be saved") from error
             csv_committed = True
-            response = {"status": "saved", **{name: row[name] for name in SAVED_RESPONSE_FIELDS if name != "status"}}
+            first = frame_rows[0]
+            response = {"status": "saved", **{name: first[name] for name in SAVED_RESPONSE_FIELDS if name != "status"}}
             with self._lock:
+                self._saved_bytes += written
+                self._saved_captures += 1
                 self._active[request.request_id] = response
                 self._persist(response)
                 self._active.pop(request.request_id, None)
-            LOG.info("Capture saved: %s frame=%s", stem, row["frame_id"])
+            LOG.info("Capture saved: %s frames=%d first_frame=%s", first["record_id"], len(frame_rows), first["frame_id"])
         finally:
             for path in temporary + ([] if csv_committed else finals):
                 try:
                     path.unlink(missing_ok=True)
                 except OSError:
                     LOG.exception("Could not remove incomplete capture file %s", path.name)
+
+    def storage_estimate(self):
+        """Free disk and how many more default triggers fit above the reserve."""
+        with self._lock:
+            per_capture = (self._saved_bytes / self._saved_captures if self._saved_captures
+                           else config.CAPTURE_BYTES_ESTIMATE * self.default_burst_frames / 15)
+        try:
+            free = shutil.disk_usage(self.session_directory).free
+        except OSError:
+            return {"disk_free_mb": None, "bytes_per_capture": per_capture, "estimated_remaining_captures": None}
+        usable = max(0., free - config.CAPTURE_DISK_RESERVE_MB * 1024 ** 2)
+        return {"disk_free_mb": free / 1024 ** 2, "bytes_per_capture": per_capture,
+                "estimated_remaining_captures": int(usable // max(per_capture, 1))}
 
     def close(self):
         with self._lock:
@@ -471,6 +644,8 @@ class CaptureManager:
                 request = self.requests.get_nowait()
                 self._finish_error(request, "SERVER_SHUTDOWN", "Pi stopped before selecting a frame")
                 self.requests.task_done()
+            # A burst still collecting frames has no complete data to save.
+            self._bursts.clear()
         # Finish frozen jobs, then stop. No terminal Y/N; successful files stay.
         self.jobs.put(None)
         self._worker.join()

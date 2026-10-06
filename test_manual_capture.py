@@ -23,9 +23,12 @@ import app
 import config
 import manual_capture
 from bubble_measurement import BubbleCalibration, BubbleMeasurement
+from calibration_store import VialCalibration
+from geometry_calibration import GeometryCalibration
 from detector import Detection, Prediction
 from display import annotate_capture_roi
-from manual_capture import CaptureFailure, CaptureManager, PI_LOG_FIELDS, SAVED_RESPONSE_FIELDS
+from manual_capture import (CaptureFailure, CaptureManager, PI_LOG_FIELDS, SAVED_RESPONSE_FIELDS,
+                            parse_capture_options)
 from stability import StabilityTracker
 from telemetry_server import TelemetryServer, build_telemetry_payload
 
@@ -47,19 +50,21 @@ def frame_data(value=60, detected=True):
     return roi, detection, measurement, timings, payload, stability
 
 
-def freeze(manager, requests, *, frame_id=42, value=60, detected=True, data=None):
+def freeze(manager, requests, *, frame_id=42, value=60, detected=True, data=None, raw_frame=None):
     roi, detection, measurement, timings, payload, stability = data or frame_data(value, detected)
     epoch = time.time() * 1000
     manager.freeze_frame(requests, roi, frame_id, detection, measurement, timings, payload, stability,
                          frame_started_epoch_ms=epoch, capture_completed_epoch_ms=epoch + 2,
-                         prediction_completed_epoch_ms=epoch + 82, frame_completed_monotonic=time.monotonic())
+                         prediction_completed_epoch_ms=epoch + 82, frame_completed_monotonic=time.monotonic(),
+                         raw_frame=raw_frame)
     return roi
 
 
 class CaptureTests(unittest.TestCase):
+    """Single-frame triggers (burst_frames=1) keep the original one-row contract."""
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
-        self.manager = CaptureManager(self.directory.name)
+        self.manager = CaptureManager(self.directory.name, default_burst_frames=1)
         self.manager.set_ready()
 
     def tearDown(self):
@@ -283,7 +288,7 @@ class CaptureTests(unittest.TestCase):
         request_id = self.trigger()
         previous = self.complete(request_id)
         self.manager.close()
-        self.manager = CaptureManager(self.directory.name)
+        self.manager = CaptureManager(self.directory.name, default_burst_frames=1)
         self.manager.set_ready()
         self.assertEqual(self.manager.submit(request_id), (200, previous))
         self.assertEqual(self.rows(), [])
@@ -302,7 +307,7 @@ class CaptureTests(unittest.TestCase):
 
     def test_writer_queue_is_bounded_and_full_job_fails(self):
         self.manager.close()
-        self.manager = CaptureManager(self.directory.name, writer_queue_size=1)
+        self.manager = CaptureManager(self.directory.name, writer_queue_size=1, default_burst_frames=1)
         self.manager.set_ready()
         entered, release = threading.Event(), threading.Event()
         original = self.manager._save
@@ -328,10 +333,134 @@ class CaptureTests(unittest.TestCase):
             release.set()
 
 
+CALIBRATION = {"geometry_version": "20261002T072923_geometry", "geometry_pending_confirmation": False,
+               "vial_version": "20261006T200000_vial", "alignment_version": "",
+               "mm_per_m_per_div": .02283, "zero_offset_div": .427}
+
+
+class BurstCaptureTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.manager = CaptureManager(self.directory.name, calibration={**CALIBRATION, "geometry_source": "g.json"})
+        self.manager.set_ready()
+
+    def tearDown(self):
+        self.manager.close()
+        self.directory.cleanup()
+
+    def rows(self):
+        with self.manager.csv_path.open(newline="", encoding="utf-8") as file:
+            return list(csv.DictReader(file))
+
+    def data(self, center):
+        roi, detection, _, timings, _, stability = frame_data()
+        measurement = BubbleCalibration(370., 18., 740, 160, "PASS", "", "fake.json").measure(center)
+        payload = build_telemetry_payload(42, detection, measurement, timings, mm_per_m_per_div=.02283,
+            zero_offset_div=.427, level_tolerance_mm_per_m=.01, max_measurable_slope_mm_per_m=.12,
+            calibration=CALIBRATION)
+        return roi, detection, measurement, timings, payload, stability
+
+    def test_default_burst_size_comes_from_config(self):
+        self.assertEqual(self.manager.default_burst_frames, config.CAPTURE_BURST_FRAMES)
+
+    def test_one_trigger_records_consecutive_frames_summary_and_lossless_raw_frame(self):
+        request_id = str(uuid.uuid4())
+        options = parse_capture_options({"request_id": request_id, "reference_deg": -.004, "a_axis_deg": -.012,
+                                         "sweep_direction": "backward", "note": "pt 2", "burst_frames": 3})
+        self.assertEqual(self.manager.submit(request_id, options)[0], 202)
+        raw = np.random.default_rng(3).integers(0, 256, (540, 960, 3), dtype=np.uint8)
+        for frame_id, center in zip((10, 11, 12), (388., 389., 393.)):
+            freeze(self.manager, self.manager.begin_frame(), frame_id=frame_id, data=self.data(center),
+                   raw_frame=raw if frame_id < 12 else raw * 0)
+            if frame_id < 12:
+                self.assertEqual(self.manager.get_status(request_id)["status"], "processing")
+        self.manager.jobs.join()
+        result = self.manager.get_status(request_id)
+        self.assertEqual((result["status"], result["frame_id"], result["sample_id"]), ("saved", 10, 1))
+        rows = self.rows()
+        self.assertEqual([row["row_type"] for row in rows], ["frame", "frame", "frame", "summary"])
+        self.assertEqual({row["burst_id"] for row in rows}, {result["record_id"]})
+        self.assertEqual([row["burst_index"] for row in rows], ["1", "2", "3", ""])
+        self.assertEqual([row["frame_id"] for row in rows], ["10", "11", "12", ""])
+        for row in rows:
+            self.assertEqual((row["sample_id"], row["burst_size"], row["reference_deg"], row["a_axis_deg"],
+                              row["sweep_direction"], row["note"]), ("1", "3", "-0.004", "-0.012", "backward", "pt 2"))
+            self.assertEqual((row["geometry_version"], row["vial_version"], row["zero_offset_div"]),
+                             (CALIBRATION["geometry_version"], CALIBRATION["vial_version"], "0.427"))
+            self.assertEqual(row["raw_image_path"], rows[0]["raw_image_path"])
+        offsets = [(center - 370) / 18 for center in (388., 389., 393.)]
+        slopes = [(offset - .427) * .02283 for offset in offsets]
+        summary = rows[-1]
+        self.assertEqual(summary["burst_valid_count"], "3")
+        self.assertAlmostEqual(float(summary["burst_median_slope_mm_per_m"]), slopes[1], places=12)
+        self.assertAlmostEqual(float(summary["burst_std_slope_mm_per_m"]), float(np.std(slopes)), places=12)
+        self.assertAlmostEqual(float(summary["burst_median_offset_div"]), offsets[1], places=12)
+        self.assertAlmostEqual(float(rows[0]["slope_mm_per_m"]), slopes[0], places=12)
+        images = self.manager.images_directory
+        self.assertEqual(len(list(images.glob("*.jpg"))), 6)
+        self.assertEqual(len({row["clean_image_path"] for row in rows[:3]}), 3)
+        saved_raw = cv2.imread(str(self.manager.session_directory / rows[0]["raw_image_path"]), cv2.IMREAD_UNCHANGED)
+        np.testing.assert_array_equal(saved_raw, raw)  # first burst frame, before undistortion, lossless
+        self.assertEqual(rows[0]["raw_frame_id"], "10")
+        estimate = self.manager.storage_estimate()
+        self.assertEqual(estimate["bytes_per_capture"], sum(path.stat().st_size for path in images.iterdir())
+                         + self.manager.csv_path.stat().st_size - len(",".join(PI_LOG_FIELDS)) - 2)
+
+    def test_bursts_overlap_and_a_late_request_starts_at_its_own_next_frame(self):
+        first, second = str(uuid.uuid4()), str(uuid.uuid4())
+        self.manager.submit(first, {"burst_frames": 2})
+        freeze(self.manager, self.manager.begin_frame(), frame_id=1)
+        self.manager.submit(second, {"burst_frames": 2})
+        for frame_id in (2, 3):
+            freeze(self.manager, self.manager.begin_frame(), frame_id=frame_id)
+        self.manager.jobs.join()
+        rows = [row for row in self.rows() if row["row_type"] == "frame"]
+        frames = {request: [row["frame_id"] for row in rows if row["request_id"] == request] for request in (first, second)}
+        self.assertEqual(frames, {first: ["1", "2"], second: ["2", "3"]})
+
+    def test_shutdown_mid_burst_saves_nothing_and_reports_error(self):
+        request_id = str(uuid.uuid4())
+        self.manager.submit(request_id, {"burst_frames": 3})
+        freeze(self.manager, self.manager.begin_frame())
+        with self.assertLogs("manual_capture", level="ERROR"):
+            self.manager.close()
+        self.assertEqual(self.rows(), [])
+        with contextlib.closing(sqlite3.connect(self.manager.root / "capture_requests.sqlite3")) as database:
+            response = json.loads(database.execute("SELECT response FROM requests WHERE request_id=?", (request_id,)).fetchone()[0])
+        self.assertEqual(response["error_code"], "SERVER_SHUTDOWN")
+
+    def test_failed_frame_ends_burst_and_frees_later_frames(self):
+        request_id = str(uuid.uuid4())
+        self.manager.submit(request_id, {"burst_frames": 3})
+        freeze(self.manager, self.manager.begin_frame())
+        bad = list(frame_data())
+        bad[0] = np.zeros((10, 10, 3), np.uint8)
+        with self.assertLogs("manual_capture", level="ERROR"):
+            freeze(self.manager, self.manager.begin_frame(), data=bad)
+        self.assertEqual(self.manager.get_status(request_id)["error_code"], "ROI_SIZE_INVALID")
+        self.assertEqual(self.manager.begin_frame(), [])
+
+    def test_metadata_records_calibration_versions(self):
+        metadata = json.loads((self.manager.session_directory / "session_metadata.json").read_text())
+        self.assertEqual(metadata["calibration"]["geometry_version"], CALIBRATION["geometry_version"])
+        self.assertEqual(metadata["calibration_source"], "g.json")
+        self.assertEqual((metadata["mm_per_m_per_div"], metadata["zero_offset_div"]), (.02283, .427))
+        self.assertEqual(metadata["capture_burst_frames_default"], config.CAPTURE_BURST_FRAMES)
+
+    def test_capture_options_are_validated_and_normalized(self):
+        self.assertEqual(parse_capture_options({"request_id": "x"}), {})
+        self.assertEqual(parse_capture_options({"reference_deg": 0, "sweep_direction": "", "note": " a\n b "}),
+                         {"reference_deg": 0.0, "note": "a b"})
+        for bad in ({"reference_deg": float("inf")}, {"a_axis_deg": 91}, {"burst_frames": config.CAPTURE_BURST_MAX_FRAMES + 1},
+                    {"note": 5}, {"extra": 1}):
+            with self.assertRaises(ValueError):
+                parse_capture_options(bad)
+
+
 class CaptureApiTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
-        self.manager = CaptureManager(self.directory.name)
+        self.manager = CaptureManager(self.directory.name, default_burst_frames=1)
         self.manager.set_ready()
         self.server = TelemetryServer(websocket_host="127.0.0.1", websocket_port=0,
             dashboard_host="127.0.0.1", dashboard_port=0,
@@ -397,8 +526,30 @@ class CaptureApiTests(unittest.TestCase):
         for _ in range(self.manager.requests.maxsize): self.post(str(uuid.uuid4()))
         self.assertEqual(self.post()[0], 429)
 
-    def test_readiness_exposes_capture_policy_only(self):
-        self.assertEqual(self.call("/api/captures/ready")[1], {"ready": True, "require_stable_for_capture": False})
+    def test_readiness_exposes_capture_policy_and_storage_only(self):
+        status, result = self.call("/api/captures/ready")
+        self.assertEqual(status, 200)
+        self.assertEqual(set(result), {"ready", "require_stable_for_capture", "burst_frames_default", "storage"})
+        self.assertEqual((result["ready"], result["require_stable_for_capture"], result["burst_frames_default"]), (True, False, 1))
+        self.assertGreater(result["storage"]["disk_free_mb"], 0)
+        self.assertGreaterEqual(result["storage"]["estimated_remaining_captures"], 0)
+
+    def test_post_accepts_capture_options_and_rejects_bad_values(self):
+        body = {"request_id": self.request_id, "reference_deg": -0.004, "a_axis_deg": -0.012,
+                "sweep_direction": "forward", "note": "point 3", "burst_frames": 1}
+        self.assertEqual(self.call("/api/captures", json.dumps(body).encode())[0], 202)
+        freeze(self.manager, self.manager.begin_frame())
+        self.manager.jobs.join()
+        with self.manager.csv_path.open(newline="", encoding="utf-8") as file:
+            row, = csv.DictReader(file)
+        self.assertEqual((row["reference_deg"], row["a_axis_deg"], row["sweep_direction"], row["note"]),
+                         ("-0.004", "-0.012", "forward", "point 3"))
+        for bad in ({"reference_deg": "x"}, {"reference_deg": True}, {"sweep_direction": "up"},
+                    {"burst_frames": 0}, {"burst_frames": 1.5}, {"note": "n" * 201}, {"metrics": 12}):
+            status, result = self.call("/api/captures", json.dumps({"request_id": str(uuid.uuid4()), **bad}).encode())
+            self.assertEqual((status, result["error_code"]), (400, "INVALID_CAPTURE_OPTIONS"), bad)
+        status, _ = self.call("/api/captures", b'{"request_id": "%s", "reference_deg": NaN}' % str(uuid.uuid4()).encode())
+        self.assertEqual(status, 400)
 
     def test_processing_can_be_queried(self):
         self.post()
@@ -409,8 +560,12 @@ class CaptureApiTests(unittest.TestCase):
 class ManualMainLoopTests(unittest.TestCase):
     def run_fake(self, trigger=False, writer_failure=False):
         with tempfile.TemporaryDirectory() as directory:
-            manager = CaptureManager(directory)
-            calibration = BubbleCalibration(370., 18., 740, 160, "PASS", "", "fake")
+            manager = CaptureManager(directory, default_burst_frames=1)
+            store = Mock()
+            store.load_geometry.return_value = GeometryCalibration("g_geometry", 1, 370., (0., 1 / 18))
+            store.load_vial.return_value = VialCalibration("v_vial", .02, 0.)
+            store.summary.return_value = {kind: {"version": None, "pending_confirmation": False}
+                                          for kind in ("geometry", "vial", "alignment")}
             request_id = str(uuid.uuid4())
             frames = 0
             detector = Mock()
@@ -431,8 +586,9 @@ class ManualMainLoopTests(unittest.TestCase):
                 stack.enter_context(patch.object(app, "CaptureManager", return_value=manager))
                 stack.enter_context(patch.object(app, "YoloDetector", return_value=detector))
                 stack.enter_context(patch.object(app, "create_camera", return_value=Mock()))
-                stack.enter_context(patch.object(app, "capture_roi", return_value=(None, roi)))
-                stack.enter_context(patch.object(app.BubbleCalibration, "from_json", return_value=calibration))
+                stack.enter_context(patch.object(app, "capture_frames", return_value=(roi, None, roi)))
+                stack.enter_context(patch.object(app, "CalibrationStore", return_value=store))
+                stack.enter_context(patch.object(app, "check_undistorted_geometry"))
                 stack.enter_context(patch.object(app, "TelemetryServer", return_value=server))
                 stack.enter_context(patch.object(app, "close_windows"))
                 logger = stack.enter_context(patch.object(app, "CsvLogger"))

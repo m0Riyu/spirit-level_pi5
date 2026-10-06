@@ -356,6 +356,18 @@
     .capture-controls .capture-note { flex: 1 1 260px; line-height: 1.5; }
     .capture-controls button:disabled { opacity: .4; cursor: wait; }
     .capture-note { color: var(--muted); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+    .calibration-banner {
+      margin: 0 0 12px; padding: 10px 14px; border: 1px solid var(--yellow); border-radius: 14px;
+      background: rgba(255, 215, 94, 0.14); color: #ffe9a3; font-size: 14px; font-weight: 700; line-height: 1.5;
+    }
+    .option-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 0 16px 6px; }
+    .option-grid label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+    .option-grid .wide { grid-column: 1 / -1; }
+    .option-grid input, .option-grid select {
+      width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 10px;
+      background: var(--panel-soft); color: var(--text); font: inherit; font-size: 16px;
+    }
+    #captureOptionsCard .capture-note { padding: 0 16px 12px; margin: 0; }
     .stability-label { color: #e9ce70; }
     .stability-label.stable { color: var(--mint); }
     .stability-label.unstable { color: #ffab70; }
@@ -383,11 +395,33 @@
       </div>
     </header>
 
+    <div id="calibrationBanner" class="calibration-banner" role="status" hidden>
+      幾何校正待確認：相機可能動過，請重做刻度檢查。仍可量測。
+    </div>
+
     <section class="card capture-controls" aria-label="手動拍攝">
       <button id="captureButton" type="button" disabled>記錄並拍照</button>
       <button id="exportPhoneLog" type="button">匯出手機端 LOG</button>
       <div id="phoneLogCount" class="capture-note" role="status" aria-live="polite">手機端紀錄：0 筆 · 已配對：0 筆 · 等待中：0 筆 · 失敗：0 筆</div>
     </section>
+
+    <details class="card diagnostics" id="captureOptionsCard">
+      <summary><span class="summary-copy"><strong>參考值與連拍</strong>
+        <span id="captureOptionsSummary">每次記錄連拍 15 幀</span></span>
+        <span class="more-button" aria-hidden="true">•••</span></summary>
+      <div class="option-grid">
+        <label>DL-S4W 讀值（°）<input id="referenceDeg" type="text" autocomplete="off" placeholder="例：-0.0040"></label>
+        <label>A 軸設定值（°）<input id="aAxisDeg" type="text" autocomplete="off" placeholder="例：-0.0120"></label>
+        <label>掃描方向<select id="sweepDirection">
+          <option value="">未指定</option><option value="forward">正向</option>
+          <option value="backward">反向</option><option value="zero_check">零點檢查</option>
+        </select></label>
+        <label>連拍幀數<input id="burstFrames" type="number" min="1" max="30" step="1" value="15" inputmode="numeric"></label>
+        <label class="wide">備註<input id="captureNote" type="text" maxlength="200" autocomplete="off" placeholder="選填"></label>
+      </div>
+      <p class="capture-note">參考值會保留到下次修改，每個量測點記錄前請先更新。</p>
+      <p id="storageEstimate" class="capture-note">剩餘空間：—</p>
+    </details>
 
     <section class="card level-visual">
       <div class="level-head">
@@ -475,6 +509,7 @@
     <footer>
       <div id="lastUpdate">尚未收到資料</div>
       <div id="endpoint"></div>
+      <div id="calibrationVersions"></div>
     </footer>
   </main>
 
@@ -644,6 +679,10 @@
         thresholds_held: "數值波動及持續時間均符合門檻" };
       $("stabilityReason").textContent = reasons[stability.reason] || "等待量測資料";
       phoneCapture.updateButton();
+      const calibration = data.calibration || {};
+      $("calibrationBanner").hidden = calibration.geometry_pending_confirmation !== true;
+      $("calibrationVersions").textContent = calibration.geometry_version
+        ? `幾何校正 ${calibration.geometry_version} · 水平儀校正 ${calibration.vial_version}` : "校正檔未載入";
 
       const performanceData = data.performance || {};
       const measurement = data.measurement || {};
@@ -720,7 +759,33 @@
       socket.addEventListener("error", () => socket.close());
     }
 
+    function captureOptions() {
+      const options = {};
+      for (const [name, id, label] of [["reference_deg", "referenceDeg", "DL-S4W 讀值"], ["a_axis_deg", "aAxisDeg", "A 軸設定值"]]) {
+        const text = $(id).value.trim();
+        if (text === "") continue;
+        const value = Number(text);
+        if (!Number.isFinite(value) || Math.abs(value) > 90) throw new Error(`${label}不是有效的角度`);
+        options[name] = value;
+      }
+      if ($("sweepDirection").value) options.sweep_direction = $("sweepDirection").value;
+      const note = $("captureNote").value.trim();
+      if (note) options.note = note;
+      const frames = Number($("burstFrames").value);
+      if (!Number.isInteger(frames) || frames < 1 || frames > 30) throw new Error("連拍幀數需為 1–30 的整數");
+      options.burst_frames = frames;
+      return options;
+    }
+
+    function updateOptionsSummary() {
+      const reference = $("referenceDeg").value.trim();
+      $("captureOptionsSummary").textContent = `每次記錄連拍 ${$("burstFrames").value || "—"} 幀` +
+        (reference ? ` · 參考 ${reference}°` : " · 未填參考值");
+    }
+    for (const id of ["referenceDeg", "burstFrames"]) $(id).addEventListener("input", updateOptionsSummary);
+
     const phoneCapture = new CaptureLog.PhoneCaptureController({
+      options: captureOptions,
       snapshot: () => {
         const metrics = numericPerformanceMetrics();
         const online = socket?.readyState === WebSocket.OPEN && lastTelemetryAt > 0 && Date.now() - lastTelemetryAt <= 2500;
@@ -734,7 +799,7 @@
           clock_offset_ms_at_press: clockOffsetMs,
         } };
       },
-      ui: { button: $("captureButton"), export: $("exportPhoneLog"), count: $("phoneLogCount") },
+      ui: { button: $("captureButton"), export: $("exportPhoneLog"), count: $("phoneLogCount"), storage: $("storageEstimate") },
     });
     phoneCapture.init();
     setInterval(() => phoneCapture.refreshReady(), 2000);

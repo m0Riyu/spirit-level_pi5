@@ -148,6 +148,18 @@ class CameraStartupTests(unittest.TestCase):
             create_maps.assert_not_called()
         self.assertGreater(np.abs(corrected.astype(float) - frame.astype(float)).mean(), 1)
 
+    def test_capture_frames_also_returns_the_frame_before_undistortion(self):
+        matrix = np.array([[760., 0, 480], [0, 760., 270], [0, 0, 1]])
+        frame = np.random.default_rng(11).integers(0, 256, (540, 960, 3), dtype=np.uint8)
+        undistorter = FullFrameUndistorter(matrix, np.array([.14, -.78, .001, .0008, 1.01]), (960, 540))
+        instance = Mock(frame_undistorter=undistorter)
+        instance.capture_array.return_value = frame.copy()
+        raw, corrected, roi = camera.capture_frames(instance)
+        instance.capture_array.assert_called_once_with("main")
+        np.testing.assert_array_equal(raw, frame)
+        np.testing.assert_array_equal(roi, corrected[190:350, 110:850])
+        self.assertGreater(np.abs(corrected.astype(float) - raw.astype(float)).mean(), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

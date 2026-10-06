@@ -139,13 +139,22 @@ def start_camera(camera, initial_controls):
     return camera
 
 
-def capture_roi(camera):
-    """Rectify the full frame BEFORE cropping the ROI used by all consumers."""
-    frame = camera.frame_undistorter.process(camera.capture_array("main"))
+def capture_frames(camera):
+    """Return (raw, rectified, roi); rectify BEFORE cropping the shared ROI.
+
+    raw is the sensor frame before undistortion, kept for lossless captures.
+    """
+    raw = camera.capture_array("main")
+    frame = camera.frame_undistorter.process(raw)
     roi = frame[
         config.ROI_Y1 : config.ROI_Y2,
         config.ROI_X1 : config.ROI_X2,
     ].copy()
+    return raw, frame, roi
+
+
+def capture_roi(camera):
+    _, frame, roi = capture_frames(camera)
     return frame, roi
 
 

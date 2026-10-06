@@ -47,9 +47,12 @@ BROWSER_SCENARIOS = r"""
     websocket_url: "ws://fake:8765", clock_offset_ms_at_press: 4.5,
   } });
   const ui = makeUi();
+  ui.storage = document.createElement("div");
   const controller = new PhoneCaptureController({ snapshot, ui, store: new PhoneLogStore(databaseName), pollMs: 10,
+    options: () => ({ reference_deg: -0.004, a_axis_deg: -0.012, sweep_direction: "forward", burst_frames: 3 }),
     fetcher: async (url, options) => {
-      if (url.endsWith("ready")) return reply(200, { ready: true, require_stable_for_capture: false });
+      if (url.endsWith("ready")) return reply(200, { ready: true, require_stable_for_capture: false, burst_frames_default: 15,
+        storage: { disk_free_mb: 97280, bytes_per_capture: 2 * 1024 ** 2, estimated_remaining_captures: 48128 } });
       if (options.method === "POST") {
         const body = JSON.parse(options.body); posts.push(body);
         metric = 999; // Metrics change before ack; frozen LOG must not change.
@@ -69,8 +72,10 @@ BROWSER_SCENARIOS = r"""
   assert(ui.button.disabled, "pending/uncertain status disables button");
   await controller.press();
   assert(posts.length === 2, "second press cannot enqueue another request");
-  assert(Object.keys(posts[0]).join(",") === "request_id", "POST sends only request_id, no phone metrics");
-  assert(posts[0].request_id === posts[1].request_id, "lost POST ack retries same request_id");
+  assert(Object.keys(posts[0]).join(",") === "request_id,reference_deg,a_axis_deg,sweep_direction,burst_frames",
+    "POST sends request_id and capture options only, no phone metrics");
+  assert(JSON.stringify(posts[0]) === JSON.stringify(posts[1]), "lost POST ack retries the identical body and request_id");
+  assert(ui.storage.textContent.includes("約可再記錄 48128 次"), "remaining capture estimate shown");
   assert(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(posts[0].request_id), "UUID v4 format on HTTP");
   release = true;
   await eventually(async () => (await controller.store.all())[0]?.status === "saved");
@@ -79,6 +84,8 @@ BROWSER_SCENARIOS = r"""
   assert(rows.length === 1, "saved reply updates same IndexedDB row");
   assert(rows[0].request_id === posts[0].request_id && rows[0].pi_frame_id === 42, "Pi IDs pair with frozen phone row");
   assert(rows[0].message_rate_hz_at_press === 12.3, "metrics frozen before asynchronous POST");
+  assert(rows[0].reference_deg === -0.004 && rows[0].burst_frames === 3, "capture options stored in phone LOG row");
+  assert(ui.status.textContent.includes("參考 -0.004°"), "saved message repeats the submitted reference value");
   for (const field of ["client_pressed_at_iso", "trigger_ack_received_at_iso", "pi_saved_response_received_at_iso"]) {
     assert(rows[0][field].endsWith("+08:00") && Date.parse(rows[0][field]) === rows[0][field.replace("_iso", "_epoch_ms")],
       `${field} uses Taipei offset and preserves epoch`);
@@ -106,6 +113,19 @@ BROWSER_SCENARIOS = r"""
   assert((await reopened.all()).length === 2, "pending recovery updates existing key without duplication");
   const recovered = (await reopened.all()).find(row => row.request_id === pendingId);
   assert(recovered.message_rate_hz_at_press === 7.7 && recovered.button_to_saved_response_ms === null, "reload preserves metrics and does not invent monotonic duration");
+
+  const invalidUi = makeUi();
+  let invalidPosts = 0;
+  const invalid = new PhoneCaptureController({ snapshot, ui: invalidUi, store: new PhoneLogStore(databaseName), pollMs: 10,
+    options: () => { throw new Error("DL-S4W 讀值不是有效的角度"); },
+    fetcher: async (url, options) => {
+      if (url.endsWith("ready")) return reply(200, { ready: true });
+      invalidPosts++; return reply(500, {});
+    } });
+  await invalid.init(); await invalid.press();
+  assert(invalidPosts === 0 && invalidUi.status.textContent.includes("無法記錄") && invalid.running.size === 0,
+    "invalid capture options block the trigger without a request");
+  invalid.store.db.close();
 
   const errorUi = makeUi();
   const failure = new PhoneCaptureController({ snapshot, ui: errorUi, store: new PhoneLogStore(databaseName), pollMs: 10,
@@ -155,7 +175,26 @@ BROWSER_SCENARIOS = r"""
   assert(legacyCsv.includes("2026-01-01T08:00:00.000+08:00") && !legacyCsv.includes("00:00:00.000Z"),
     "existing UTC phone records export in Taipei timezone");
   assert(document.querySelector("img,video,canvas") === null, "dashboard receives no image stream");
-  assert(document.querySelector("input,textarea") === null, "no reference/platform/note input");
+  const optionsCard = document.getElementById("captureOptionsCard");
+  assert(optionsCard.tagName === "DETAILS" && !optionsCard.open, "capture options card exists and is collapsed");
+  for (const id of ["referenceDeg", "aAxisDeg", "sweepDirection", "burstFrames", "captureNote"]) {
+    assert(optionsCard.contains(document.getElementById(id)), `${id} input inside options card`);
+  }
+  document.getElementById("referenceDeg").value = " -0.0051 ";
+  document.getElementById("sweepDirection").value = "zero_check";
+  document.getElementById("captureNote").value = "start";
+  assert(JSON.stringify(captureOptions()) === JSON.stringify({ reference_deg: -0.0051, sweep_direction: "zero_check",
+    note: "start", burst_frames: 15 }), "page reads typed capture options");
+  document.getElementById("referenceDeg").value = "abc";
+  let rejected = false;
+  try { captureOptions(); } catch { rejected = true; }
+  assert(rejected, "page rejects a non-numeric reference value");
+  document.getElementById("referenceDeg").value = "";
+  document.getElementById("burstFrames").value = "31";
+  rejected = false;
+  try { captureOptions(); } catch { rejected = true; }
+  assert(rejected, "page rejects burst frames above 30");
+  document.getElementById("burstFrames").value = "15";
   assert(document.getElementById("stabilityCard").tagName === "DETAILS", "collapsible stability card exists");
   assert(document.getElementById("captureButton").textContent === "記錄並拍照", "capture button exists");
   renderTelemetry({ type: "telemetry", frame_id: 42, sent_at_epoch_ms: Date.now(),
@@ -164,6 +203,12 @@ BROWSER_SCENARIOS = r"""
     stability: { state: "STABLE", stable: true, sample_count: 20, valid_count: 20, valid_ratio: 1,
       mean_slope_mm_per_m: .04, std_slope_mm_per_m: .001, range_slope_mm_per_m: .003, stable_duration_seconds: 2 } });
   assert(document.getElementById("stabilityState").textContent === "穩定" && document.getElementById("state").textContent === "ADJUST", "stability independent of system level state");
+  assert(document.getElementById("calibrationBanner").hidden, "no calibration banner without pending geometry");
+  renderTelemetry({ type: "telemetry", frame_id: 43, sent_at_epoch_ms: Date.now(), system_state: "ADJUST",
+    performance: {}, measurement: {}, stability: {},
+    calibration: { geometry_version: "g1_geometry", vial_version: "v1_vial", geometry_pending_confirmation: true } });
+  assert(!document.getElementById("calibrationBanner").hidden, "pending geometry shows the yellow banner");
+  assert(document.getElementById("calibrationVersions").textContent.includes("v1_vial"), "active calibration versions shown");
   for (const store of [reopened, recovery.store, failure.store]) store.db.close();
   return { checks, csv };
 })()
@@ -179,12 +224,15 @@ class DashboardContractTests(unittest.TestCase):
         for value in ('id="stabilityCard"', 'id="captureButton"', 'id="exportPhoneLog"', 'id="phoneLogCount"'):
             self.assertIn(value, self.html)
 
-    def test_no_image_stream_or_reference_inputs(self):
-        for value in ("<img", "<video", "<canvas", "<input", "reference_value", "reference_angle"):
+    def test_no_image_stream_and_capture_option_inputs(self):
+        for value in ("<img", "<video", "<canvas"):
             self.assertNotIn(value, self.html)
+        for value in ('id="captureOptionsCard"', 'id="referenceDeg"', 'id="aAxisDeg"', 'id="sweepDirection"',
+                      'id="burstFrames"', 'id="captureNote"', 'id="calibrationBanner"'):
+            self.assertIn(value, self.html)
 
-    def test_post_body_is_only_id_and_indexeddb_key_is_id(self):
-        self.assertIn('JSON.stringify({ request_id: row.request_id })', self.js)
+    def test_post_body_is_id_plus_options_and_indexeddb_key_is_id(self):
+        self.assertIn('JSON.stringify(captureBody(row))', self.js)
         self.assertIn('keyPath: "request_id"', self.js)
         self.assertIn("indexedDB.open", self.js)
 

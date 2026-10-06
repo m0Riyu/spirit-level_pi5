@@ -47,15 +47,12 @@ CONFIDENCE_THRESHOLD = 0.25
 VCM_FOCUS_ABSOLUTE = 3711
 VCM_FOCUS_SETTLE_SECONDS = 0.25
 
-# Tuner JSON records its image coordinate system. Rectified measurements are
-# used directly; legacy JSON without this metadata uses original ROI pixels.
+# Two-layer calibration, versioned under calibration/<kind>/ (active.json):
+#   geometry: rectified ROI pixel -> divisions (redo whenever the camera moves)
+#   vial:     divisions -> mm/m, gain and zero offset (redo only for a new vial)
+# migrate_calibration.py creates the first versions from the legacy tick JSON.
 ENABLE_BUBBLE_MEASUREMENT = True
-BUBBLE_CALIBRATION_PATH = (
-    PROJECT_DIRECTORY
-    / "binary_stream_tuner_project"
-    / "binary_captures"
-    / "binary_20261002_072923_517806_tick_measurement.json"
-)
+CALIBRATION_DIRECTORY = PROJECT_DIRECTORY / "calibration"
 
 # Web dashboard and WebSocket telemetry. Open http://<Pi IP>:8100 on a phone
 # connected to the same network. The WebSocket endpoint is ws://<Pi IP>:8865.
@@ -66,9 +63,8 @@ DASHBOARD_HOST = "0.0.0.0"
 DASHBOARD_PORT = 8100
 TELEMETRY_SEND_EVERY = 2  # About 5 Hz at 10 inference FPS; YOLO still runs every frame.
 
-# Physical conversion uses calibrated divisions after coordinate conversion.
-# The current rectified tick JSON records 18 pixels per division.
-MM_PER_M_PER_DIV = 0.02
+# Thresholds are in mm/m after the vial calibration (kept unchanged when the
+# vial gain changed from nominal 0.02 to the fitted value).
 LEVEL_TOLERANCE_MM_PER_M = 0.01
 MAX_MEASURABLE_SLOPE_MM_PER_M = 0.12
 
@@ -86,6 +82,17 @@ STABILITY_HOLD_SECONDS = 1.5
 REQUIRE_STABLE_FOR_CAPTURE = False
 
 JPEG_QUALITY = 95
+# One phone trigger records this many consecutive frames (one CSV row each,
+# shared burst_id) plus a summary row. A request may ask for 1..MAX frames.
+CAPTURE_BURST_FRAMES = 15
+CAPTURE_BURST_MAX_FRAMES = 30
+# Lossless full frame BEFORE undistortion, once per trigger, for reprocessing.
+SAVE_RAW_FRAME_PNG = True
+RAW_PNG_COMPRESSION = 1  # 0-9; 1 keeps encoding near 40 ms on the Pi 5.
+# Remaining-capture estimate: bytes per trigger before this session has saved
+# one (15 frames x two ROI JPEGs + raw PNG), and free space kept in reserve.
+CAPTURE_BYTES_ESTIMATE = 2 * 1024 ** 2
+CAPTURE_DISK_RESERVE_MB = 1024
 CAPTURE_REQUEST_QUEUE_SIZE = 4
 CAPTURE_WRITER_QUEUE_SIZE = 4
 CAPTURE_MAX_ACTIVE_REQUESTS = 4
