@@ -1,6 +1,3 @@
 # Preserve the exact bytes and hashes of archived source and calibration data.
 backups/v1-b/** -text
 backups/v1-b/**/validation_report.csv whitespace=cr-at-eol
-
-# Preserve bytes of the original my_project directory snapshot.
-my_project/** -text
