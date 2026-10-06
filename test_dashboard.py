@@ -174,7 +174,10 @@ BROWSER_SCENARIOS = r"""
     client_pressed_at_epoch_ms: 1767225600000}]);
   assert(legacyCsv.includes("2026-01-01T08:00:00.000+08:00") && !legacyCsv.includes("00:00:00.000Z"),
     "existing UTC phone records export in Taipei timezone");
-  assert(document.querySelector("img,video,canvas") === null, "dashboard receives no image stream");
+  assert(document.querySelector("#viewMeasure img, #viewMeasure video, #viewMeasure canvas") === null,
+    "measurement view receives no image stream");
+  assert(document.getElementById("ticksPreview").hidden && !document.getElementById("ticksPreview").hasAttribute("src"),
+    "tick preview stays closed until requested");
   const optionsCard = document.getElementById("captureOptionsCard");
   assert(optionsCard.tagName === "DETAILS" && !optionsCard.open, "capture options card exists and is collapsed");
   for (const id of ["referenceDeg", "aAxisDeg", "sweepDirection", "burstFrames", "captureNote"]) {
@@ -244,6 +247,45 @@ BROWSER_SCENARIOS = r"""
   await eventually(() => !document.getElementById("viewSystem").hidden);
   assert(document.getElementById("viewMeasure").hidden && document.getElementById("modeBanner").hidden,
     "system page does not claim a camera mode");
+  // ③ tick check page with a faked server.
+  const realFetch = window.fetch;
+  const applyBodies = [];
+  window.fetch = async (url, options = {}) => {
+    if (url.startsWith("/api/ticks/abc123def456/apply")) {
+      const body = JSON.parse(options.body); applyBodies.push(body);
+      return body.confirm ? reply(200, { status: "applied", version: "20261007T010000_geometry", calibration: { status: "ok" } })
+        : reply(409, { status: "error", error_code: "CONFIRMATION_REQUIRED", message: "需再次確認" });
+    }
+    if (url.startsWith("/api/calibration/geometry/") && url.endsWith("/activate")) return reply(200, { status: "ok" });
+    if (url.startsWith("/api/calibration/geometry")) return reply(200, { kind: "geometry", active: {},
+      versions: [{ version: "20261002T072923_geometry", active: false }, { version: "20261007T010000_geometry", active: true }] });
+    return reply(404, {});
+  };
+  location.hash = "#/ticks";
+  await eventually(() => !document.getElementById("viewTicks").hidden);
+  tickMeasurementId = "abc123def456";
+  renderTickResult({ id: "abc123def456", status: "done", frames_collected: 20, frames_target: 20, message: "",
+    result: { checks: { tick_count: 26, expected_tick_count: 26, tick_count_ok: true, residual_rms_ok: true,
+      max_residual_rms_px: .5, pitch_change_vs_previous: .051, pitch_change_ok: false, passed: true, needs_confirmation: true },
+      fit_residual_rms_px: .16, fit_residual_max_px: .5, px_per_div_center: 18.92, previous_px_per_div_center: 18.0,
+      scale_center_x_px: 381.12, previous_scale_center_x_px: 370.25, left_right_magnification_diff: -.0044,
+      roll_deg: -.28, polynomial_degree: 2, inner_half_gap_div: 4.48, frames_used: 20 } });
+  const resultText = document.getElementById("ticksResult").textContent;
+  assert(resultText.includes("26 / 26 ✅") && resultText.includes("18.000 → 18.920（+5.10%）⚠️") &&
+    resultText.includes("370.25 → 381.12 px（+10.87 px）") && resultText.includes("-0.28 °"), "tick result rows and marks");
+  await applyTickResult();
+  assert(document.getElementById("ticksApply").textContent.includes("再按一次") && applyBodies[0].confirm === false,
+    "pitch change over the limit asks for a second press");
+  await applyTickResult();
+  assert(applyBodies[1].confirm === true && document.getElementById("ticksApply").textContent.includes("已套用"),
+    "second press applies with confirmation");
+  await refreshHistory();
+  const history = document.getElementById("geometryHistory");
+  assert(history.children.length === 2 && history.children[0].textContent.includes("（使用中）"), "history lists newest first");
+  const rollback = history.querySelector("button");
+  rollback.click();
+  assert(rollback.textContent.includes("再按一次"), "rollback needs a second press");
+  window.fetch = realFetch;
   location.hash = "#/measure";
   await eventually(() => !document.getElementById("viewMeasure").hidden);
   for (const store of [reopened, recovery.store, failure.store]) store.db.close();
@@ -262,8 +304,11 @@ class DashboardContractTests(unittest.TestCase):
             self.assertIn(value, self.html)
 
     def test_no_image_stream_and_capture_option_inputs(self):
+        measure_view = self.html[self.html.index('id="viewMeasure"'):self.html.index("<footer>")]
         for value in ("<img", "<video", "<canvas"):
-            self.assertNotIn(value, self.html)
+            self.assertNotIn(value, measure_view)
+        self.assertEqual(self.html.count("<img"), 1)  # the ③ preview, opened on request only
+        self.assertIn('id="ticksPreview"', self.html)
         for value in ('id="captureOptionsCard"', 'id="referenceDeg"', 'id="aAxisDeg"', 'id="sweepDirection"',
                       'id="burstFrames"', 'id="captureNote"', 'id="calibrationBanner"'):
             self.assertIn(value, self.html)

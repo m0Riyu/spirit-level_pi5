@@ -8,7 +8,7 @@ import json
 import math
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -84,6 +84,13 @@ class CalibrationStore:
             raise ValueError(f"invalid {kind} version name: {version}")
         return self.root / kind / f"{version}.json"
 
+    def new_version(self, kind, now=None):
+        """Timestamp version name, moved forward a second if already taken."""
+        now = (now or datetime.now(TIMEZONE)).replace(microsecond=0)
+        while self.path(kind, new_version(kind, now)).exists():
+            now += timedelta(seconds=1)
+        return new_version(kind, now)
+
     def active_state(self, kind):
         """{"version": str | None, "pending_confirmation": bool}."""
         self._check_kind(kind)
@@ -146,3 +153,16 @@ class CalibrationStore:
     def summary(self):
         """Active versions for LOG metadata, telemetry and /api/state."""
         return {kind: self.active_state(kind) for kind in KINDS}
+
+
+def calibration_info(store, geometry, vial):
+    """Versions and vial constants recorded in telemetry and every LOG row."""
+    state = store.summary()
+    return {
+        "geometry_version": geometry.version,
+        "geometry_pending_confirmation": state["geometry"]["pending_confirmation"],
+        "vial_version": vial.version,
+        "alignment_version": state["alignment"]["version"] or "",
+        "mm_per_m_per_div": vial.mm_per_m_per_div,
+        "zero_offset_div": vial.zero_offset_div,
+    }

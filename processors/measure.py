@@ -59,8 +59,21 @@ class MeasureProcessor:
         self.set_calibration(geometry, vial, calibration)
 
     def set_calibration(self, geometry, vial, calibration):
-        """Swap the active calibration between frames (e.g. after ③)."""
-        self.geometry, self.vial, self.calibration = geometry, vial, dict(calibration or {})
+        """Swap the calibration from any thread (e.g. after ③ apply): one tuple
+        assignment, so a frame never mixes old and new values."""
+        self.active = (geometry, vial, dict(calibration or {}))
+
+    @property
+    def geometry(self):
+        return self.active[0]
+
+    @property
+    def vial(self):
+        return self.active[1]
+
+    @property
+    def calibration(self):
+        return self.active[2]
 
     def enter(self):
         # A window from before the switch would describe an older scene.
@@ -76,17 +89,21 @@ class MeasureProcessor:
         # arriving during capture/YOLO must wait for the following frame.
         return {"requests": self.captures.begin_frame(), "loop_start": time.perf_counter()}
 
-    def measure(self, detection):
-        if self.geometry is None:
+    @staticmethod
+    def measure(geometry, detection):
+        if geometry is None:
             return BubbleMeasurement.disabled(
                 "calibration_unavailable" if config.ENABLE_BUBBLE_MEASUREMENT else "measurement_disabled")
-        return self.geometry.measure(detection.center_x_roi if detection.detected else None)
+        if not detection.detected:
+            return geometry.measure(None)
+        return geometry.measure(detection.center_x_roi, detection.x1_roi, detection.x2_roi)
 
     def process(self, frame, context):
         frame_id, loop_start = frame.frame_id, context["loop_start"]
+        geometry, vial, calibration = self.active
         prediction = self.detector.predict(frame.roi)
         prediction_completed_at_epoch_ms = time.time() * 1000.0
-        measurement = self.measure(prediction.detection)
+        measurement = self.measure(geometry, prediction.detection)
 
         process_ms = (time.perf_counter() - loop_start) * 1000.0
         timings = {
@@ -99,14 +116,14 @@ class MeasureProcessor:
             "process_ms": process_ms,
             "fps": 1000.0 / process_ms if process_ms > 0 else 0.0,
         }
-        vial = self.vial or NOMINAL_VIAL
+        vial = vial or NOMINAL_VIAL
         payload = build_telemetry_payload(
             frame_id, prediction.detection, measurement, timings,
             mm_per_m_per_div=vial.mm_per_m_per_div,
             zero_offset_div=vial.zero_offset_div,
             level_tolerance_mm_per_m=config.LEVEL_TOLERANCE_MM_PER_M,
             max_measurable_slope_mm_per_m=config.MAX_MEASURABLE_SLOPE_MM_PER_M,
-            calibration=self.calibration or None,
+            calibration=calibration or None,
         )
         stability = self.stability.update(
             payload["measurement"]["valid"], payload["measurement"]["slope_mm_per_m"],

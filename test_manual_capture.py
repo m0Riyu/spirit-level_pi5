@@ -20,6 +20,7 @@ import cv2
 import numpy as np
 
 import app
+import calibration_runtime
 import camera_service
 import config
 import manual_capture
@@ -590,7 +591,7 @@ class ManualMainLoopTests(unittest.TestCase):
                 stack.enter_context(patch.object(app, "create_camera", return_value=Mock()))
                 stack.enter_context(patch.object(camera_service, "capture_frames", return_value=(roi, None, roi)))
                 stack.enter_context(patch.object(app, "CalibrationStore", return_value=store))
-                stack.enter_context(patch.object(app, "check_undistorted_geometry"))
+                stack.enter_context(patch.object(calibration_runtime, "check_undistorted_geometry"))
                 stack.enter_context(patch.object(app, "TelemetryServer", return_value=server))
                 stack.enter_context(patch.object(app, "close_windows"))
                 logger = stack.enter_context(patch.object(app, "CsvLogger"))

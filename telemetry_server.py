@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import logging
 import math
+import re
 import socket
 import threading
 import time
@@ -120,11 +122,53 @@ def build_telemetry_payload(
 
 
 class _NoCacheRequestHandler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, capture_manager=None, state_provider=None, mode_handler=None, **kwargs):
+    def __init__(self, *args, capture_manager=None, state_provider=None, mode_handler=None,
+                 routes=(), preview=None, **kwargs):
         self.capture_manager = capture_manager
         self.state_provider = state_provider
         self.mode_handler = mode_handler
+        self.routes = routes
+        self.preview = preview
         super().__init__(*args, **kwargs)
+
+    def _route(self, method):
+        """Generic JSON API: routes are (method, regex, handler(params, body) -> (status, json))."""
+        path = self.path.split("?", 1)[0]
+        for route_method, pattern, handler in self.routes:
+            match = pattern.fullmatch(path) if route_method == method else None
+            if match is None:
+                continue
+            body = {}
+            if method == "POST":
+                body = self._read_json_object(4096, allow_empty=True)
+                if body is None:
+                    return True
+            try:
+                status, response = handler(match.groupdict(), body)
+            except ValueError as error:
+                status, response = 400, {"status": "error", "error_code": "INVALID_REQUEST", "message": str(error)}
+            except Exception:
+                logging.getLogger(__name__).exception("API %s %s failed", method, path)
+                status, response = 500, {"status": "error", "error_code": "INTERNAL_ERROR", "message": "server error"}
+            self._json(status, response)
+            return True
+        return False
+
+    def _stream_preview(self):
+        if self.preview is None or not self.preview.source:
+            self._json(409, {"status": "error", "error_code": "PREVIEW_UNAVAILABLE",
+                             "message": "預覽只在相機對位與刻度檢查模式提供"})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+        self.end_headers()
+        try:
+            for jpeg in self.preview.frames():
+                self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                                 + str(len(jpeg)).encode() + b"\r\n\r\n" + jpeg + b"\r\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def _json(self, status, payload):
         body = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
@@ -134,7 +178,7 @@ class _NoCacheRequestHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _read_json_object(self, maximum_bytes):
+    def _read_json_object(self, maximum_bytes, allow_empty=False):
         """Same-origin JSON object body, or None after an error response."""
         # Same-origin browser API. A foreign Origin cannot enqueue work.
         origin = self.headers.get("Origin")
@@ -143,6 +187,8 @@ class _NoCacheRequestHandler(SimpleHTTPRequestHandler):
             return None
         try:
             length = int(self.headers.get("Content-Length", "0"))
+            if allow_empty and length == 0:
+                return {}
             if not 0 < length <= maximum_bytes:
                 raise ValueError(f"JSON body must be between 1 and {maximum_bytes} bytes")
             self.connection.settimeout(5)
@@ -155,6 +201,8 @@ class _NoCacheRequestHandler(SimpleHTTPRequestHandler):
             return None
 
     def do_POST(self):
+        if self._route("POST"):
+            return
         path = self.path.split("?", 1)[0]
         if path == "/api/mode":
             self._post_mode()
@@ -203,7 +251,12 @@ class _NoCacheRequestHandler(SimpleHTTPRequestHandler):
             self._json(400, {"status": "error", "error_code": "INVALID_MODE", "message": str(error)})
 
     def do_GET(self):
+        if self._route("GET"):
+            return
         path = self.path.split("?", 1)[0]
+        if path == "/api/preview.mjpg":
+            self._stream_preview()
+            return
         if path == "/api/state":
             if self.state_provider is None:
                 self._json(503, {"status": "error", "error_code": "SERVER_NOT_READY", "message": "state unavailable"})
@@ -271,6 +324,8 @@ class TelemetryServer:
         capture_manager=None,
         state_provider=None,
         mode_handler=None,
+        routes=(),
+        preview=None,
     ):
         self.websocket_host = websocket_host
         self.websocket_port = int(websocket_port)
@@ -280,6 +335,8 @@ class TelemetryServer:
         self.capture_manager = capture_manager
         self.state_provider = state_provider
         self.mode_handler = mode_handler
+        self.routes = [(method, re.compile(pattern), handler) for method, pattern, handler in routes]
+        self.preview = preview
 
         self._clients = set()
         self._loop = None
@@ -304,6 +361,8 @@ class TelemetryServer:
             capture_manager=self.capture_manager,
             state_provider=self.state_provider,
             mode_handler=self.mode_handler,
+            routes=self.routes,
+            preview=self.preview,
         )
         self._http_server = ThreadingHTTPServer(
             (self.dashboard_host, self.dashboard_port), handler

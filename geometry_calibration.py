@@ -69,7 +69,10 @@ class GeometryCalibration:
                 break
         return x
 
-    def measure(self, bubble_center_x_roi):
+    def measure(self, bubble_center_x_roi, x1_roi=None, x2_roi=None):
+        """Divisions of the bubble. With the box ends, offset = (f(x1) + f(x2)) / 2:
+        both ends lie on the ticked part of the scale (interpolation), while the
+        center lies in the logo gap. For a degree-1 f this equals f(center)."""
         if bubble_center_x_roi in (None, ""):
             return BubbleMeasurement(
                 error="bubble_not_detected", scale_center_x_roi=self.zero_x_roi(),
@@ -78,7 +81,10 @@ class GeometryCalibration:
         center_x = float(bubble_center_x_roi)
         scale_center = self.zero_x_roi()
         offset_px = center_x - scale_center
-        offset_div = self.divisions(center_x)
+        if x1_roi in (None, "") or x2_roi in (None, ""):
+            offset_div = self.divisions(center_x)
+        else:
+            offset_div = (self.divisions(x1_roi) + self.divisions(x2_roi)) / 2
         direction = "right" if offset_div > 0 else "left" if offset_div < 0 else "center"
         return BubbleMeasurement(
             valid=1, center_x_roi=center_x, scale_center_x_roi=scale_center,
@@ -144,4 +150,74 @@ def legacy_tick_geometry(data, *, version, created_at_iso, source_path, previous
         "source_created_utc": str(data.get("created_utc", "")),
         "conversion": "legacy degree-1: (x - reference_midpoint_x) / global_pitch.pitch_px",
         "previous_version": previous_version,
+    }
+
+
+def fit_geometry(ticks, *, degree, version, created_at_iso, frames_used=1, roll_deg=None,
+                 focus_absolute=None, image_geometry=None, previous=None, source_image="",
+                 expected_ticks=26, max_residual_rms_px=0.5, max_pitch_change=0.03):
+    """Least squares f(x) = sum c_i (x - x_center)^i with f(x_k) = ±(k + h).
+
+    h (innermost tick to center, in divisions) is fitted, not assumed. All
+    ticks enter one fit, so the 0.5 px detection steps average out instead of
+    entering a single spacing. Returns the geometry JSON record with checks.
+    """
+    if not 1 <= int(degree) <= 3:
+        raise ValueError("polynomial degree must be 1-3")
+    by_key = {(tick["side"], tick["tick_id"]): float(tick["x"]) for tick in ticks}
+    pairs = [(by_key[("left", k)] + by_key[("right", k)]) / 2 for side, k in by_key
+             if side == "left" and ("right", k) in by_key]
+    if len(pairs) < 2 or len(ticks) < degree + 3:
+        raise ValueError("too few ticks on both sides to fit the scale")
+    x_center = float(np.median(pairs))
+    x = np.array([float(tick["x"]) for tick in ticks])
+    sign = np.array([-1. if tick["side"] == "left" else 1. for tick in ticks])
+    tick_id = np.array([float(tick["tick_id"]) for tick in ticks])
+    design = np.column_stack([(x - x_center) ** power for power in range(degree + 1)] + [-sign])
+    solution = np.linalg.lstsq(design, sign * tick_id, rcond=None)[0]
+    coefficients, inner_half_gap = solution[:-1], float(solution[-1])
+    geometry = GeometryCalibration(version, degree, x_center, tuple(coefficients))
+    slope = np.array([geometry.derivative(value) for value in x])
+    residual_px = (polynomial.polyval(x - x_center, coefficients) - sign * (tick_id + inner_half_gap)) / slope
+    rms, worst = float(np.sqrt(np.mean(residual_px ** 2))), float(np.max(np.abs(residual_px)))
+
+    scale_center = geometry.zero_x_roi()
+    pitch = geometry.px_per_div(scale_center)
+    left_pitch = float(np.mean([geometry.px_per_div(value) for value in x[sign < 0]]))
+    right_pitch = float(np.mean([geometry.px_per_div(value) for value in x[sign > 0]]))
+    previous_pitch = None
+    if previous is not None:
+        previous_pitch = previous.px_per_div(previous.zero_x_roi())
+    change = None if previous_pitch is None else pitch / previous_pitch - 1
+    checks = {
+        "tick_count": len(ticks), "expected_tick_count": expected_ticks,
+        "tick_count_ok": len(ticks) == expected_ticks,
+        "residual_rms_ok": rms < max_residual_rms_px, "max_residual_rms_px": max_residual_rms_px,
+        "pitch_change_vs_previous": change, "max_pitch_change": max_pitch_change,
+        "pitch_change_ok": change is None or abs(change) < max_pitch_change,
+    }
+    checks["passed"] = checks["tick_count_ok"] and checks["residual_rms_ok"]
+    checks["needs_confirmation"] = checks["passed"] and not checks["pitch_change_ok"]
+    return {
+        "schema_version": 1,
+        "version": version,
+        "created_at_iso": created_at_iso,
+        "polynomial_degree": int(degree),
+        "x_center_px": x_center,
+        "coefficients_x_to_div": [float(value) for value in coefficients],
+        "inner_half_gap_div": inner_half_gap,
+        "tick_positions_px": list(ticks),
+        "fit_residual_rms_px": rms,
+        "fit_residual_max_px": worst,
+        "frames_used": int(frames_used),
+        "focus_absolute": focus_absolute,
+        "image_geometry": dict(image_geometry or {}),
+        "scale_center_x_px": scale_center,
+        "px_per_div_center": pitch,
+        "previous_px_per_div_center": previous_pitch,
+        "left_right_magnification_diff": (left_pitch - right_pitch) / ((left_pitch + right_pitch) / 2),
+        "roll_deg": roll_deg,
+        "checks": checks,
+        "source_image": source_image,
+        "previous_version": previous.version if previous is not None else None,
     }

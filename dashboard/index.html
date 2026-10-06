@@ -380,6 +380,17 @@
     .status-list { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 0; font-size: 14px; }
     .status-list dt { color: var(--muted); }
     .status-list dd { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .page-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+    .page button, .history button {
+      padding: 9px 14px; border: 1px solid var(--mint); border-radius: 10px; background: #123d30;
+      color: #ecfff7; font: inherit; font-size: 15px; font-weight: 700; cursor: pointer;
+    }
+    .page button:disabled { opacity: .4; cursor: wait; }
+    .page button.warn { border-color: var(--yellow); background: #3d3412; }
+    .preview { display: block; width: 100%; max-width: 100%; border-radius: 12px; margin-top: 8px; }
+    .history { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; font-size: 14px; }
+    .history li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; overflow-wrap: anywhere; }
+    .history .active { color: var(--mint); font-weight: 800; }
     .mode-banner { border-color: var(--orange); background: rgba(255, 154, 95, 0.14); color: #ffd3b8; }
     .mode-banner button {
       margin-left: 8px; padding: 4px 10px; border: 1px solid var(--orange); border-radius: 8px;
@@ -447,10 +458,30 @@
       <p id="alignStatus" class="capture-note">等待資料…</p>
     </section>
 
-    <section id="viewTicks" class="view card page" data-mode="ticks" hidden>
-      <h2>③ 刻度檢查</h2>
-      <p>已切換到刻度檢查模式（不執行 YOLO）。多幀刻度量測、擬合與套用將於 P3 實作。</p>
-      <p id="ticksStatus" class="capture-note">等待資料…</p>
+    <section id="viewTicks" class="view" data-mode="ticks" hidden>
+      <div class="card page">
+        <h2>③ 刻度檢查</h2>
+        <p>相機動過後要重做。量測時請勿碰觸水平儀，氣泡需靜止且不遮住刻度。</p>
+        <p id="ticksStatus" class="capture-note">等待資料…</p>
+        <div class="page-actions">
+          <button id="ticksMeasure" type="button">量測</button>
+          <button id="ticksPreviewToggle" type="button">顯示預覽</button>
+        </div>
+        <img id="ticksPreview" class="preview" alt="刻度預覽（綠線為偵測到的刻度）" hidden>
+      </div>
+      <div id="ticksResultCard" class="card page" hidden>
+        <h2>量測結果</h2>
+        <dl id="ticksResult" class="status-list"></dl>
+        <p id="ticksMessage" class="capture-note"></p>
+        <div class="page-actions">
+          <button id="ticksApply" type="button">套用為新版本</button>
+          <button id="ticksRemeasure" type="button">重新量測</button>
+        </div>
+      </div>
+      <div class="card page">
+        <h2>幾何校正歷史版本</h2>
+        <ul id="geometryHistory" class="history"></ul>
+      </div>
     </section>
 
     <section id="viewSystem" class="view card page" hidden>
@@ -894,6 +925,8 @@
       for (const [route, id] of Object.entries(ROUTES)) $(id).hidden = route !== currentRoute;
       const mode = ROUTE_MODES[currentRoute];
       if (mode) requestMode(mode);
+      if (currentRoute !== "#/ticks") setTicksPreview(false);
+      else refreshHistory();
       renderModeBanner();
     }
 
@@ -960,9 +993,151 @@
     }
 
     function renderModeHeartbeat(data) {
-      const target = data.type === "align" ? $("alignStatus") : $("ticksStatus");
-      target.textContent = `${data.message} · frame ${data.frame_id} · 擷取 ${number(data.capture_ms, 1, "ms")}`;
+      if (data.type === "align") {
+        $("alignStatus").textContent = `${data.message} · frame ${data.frame_id} · 擷取 ${number(data.capture_ms, 1, "ms")}`;
+        return;
+      }
+      const progress = data.measurement ? ` · 量測中 ${data.measurement.frames_collected} / ${data.measurement.frames_target} 幀` : "";
+      $("ticksStatus").textContent = `即時偵測 ${data.tick_count} / ${data.expected_tick_count} 條刻度` +
+        ` · Roll ${number(data.roll_deg, 2, "°", true)}${progress}`;
+      if (data.finished && data.finished.id === tickMeasurementId) renderTickResult(data.finished);
     }
+
+    // ---- ③ tick check ------------------------------------------------------
+    let tickMeasurementId = null;
+    let tickConfirmArmed = false;
+    const check = (ok) => ok ? "✅" : "⚠️";
+
+    function percent(value, digits = 2) { return value == null ? "—" : `${value >= 0 ? "+" : ""}${(value * 100).toFixed(digits)}%`; }
+
+    function renderTickResult(measurement) {
+      $("ticksResultCard").hidden = false;
+      tickConfirmArmed = false;
+      const result = measurement.result, rows = [];
+      if (measurement.status === "measuring") {
+        rows.push(["狀態", `量測中 ${measurement.frames_collected} / ${measurement.frames_target} 幀`]);
+      } else if (!result) {
+        rows.push(["狀態", measurement.status === "cancelled" ? "已中止" : "失敗"]);
+      } else {
+        const c = result.checks;
+        rows.push(["刻度數", `${c.tick_count} / ${c.expected_tick_count} ${check(c.tick_count_ok)}`]);
+        rows.push(["擬合殘差", `RMS ${result.fit_residual_rms_px.toFixed(2)} px（上限 ${c.max_residual_rms_px}）· 最大 ${result.fit_residual_max_px.toFixed(2)} px ${check(c.residual_rms_ok)}`]);
+        rows.push(["中心處 px/格", result.previous_px_per_div_center == null ? `${result.px_per_div_center.toFixed(3)}` :
+          `${result.previous_px_per_div_center.toFixed(3)} → ${result.px_per_div_center.toFixed(3)}（${percent(c.pitch_change_vs_previous)}）${check(c.pitch_change_ok)}`]);
+        rows.push(["刻度中心", result.previous_scale_center_x_px == null ? `${result.scale_center_x_px.toFixed(2)} px` :
+          `${result.previous_scale_center_x_px.toFixed(2)} → ${result.scale_center_x_px.toFixed(2)} px（${number(result.scale_center_x_px - result.previous_scale_center_x_px, 2, "px", true)}）`]);
+        rows.push(["左右放大率差", percent(result.left_right_magnification_diff)]);
+        rows.push(["Roll（由刻度線傾斜推得）", number(result.roll_deg, 2, "°", true)]);
+        rows.push(["多項式", `${result.polynomial_degree} 次 · 最內側刻度距中心 ${result.inner_half_gap_div.toFixed(3)} 格 · ${result.frames_used} 幀中位數`]);
+      }
+      if (measurement.applied_version) rows.push(["已套用", measurement.applied_version]);
+      $("ticksResult").replaceChildren(...rows.flatMap(([label, value]) => {
+        const term = document.createElement("dt"), detail = document.createElement("dd");
+        term.textContent = label; detail.textContent = value;
+        return [term, detail];
+      }));
+      $("ticksMessage").textContent = measurement.message || "";
+      const passed = Boolean(result?.checks.passed) && !measurement.applied_version;
+      $("ticksApply").disabled = !passed;
+      $("ticksApply").textContent = "套用為新版本";
+      $("ticksApply").classList.remove("warn");
+      $("ticksMeasure").disabled = measurement.status === "measuring";
+    }
+
+    async function postJson(url, body = {}) {
+      const response = await fetch(url, { method: "POST", cache: "no-store",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      return { ok: response.ok, code: response.status, data: await response.json() };
+    }
+
+    async function startTickMeasurement() {
+      $("ticksMeasure").disabled = true;
+      try {
+        const response = await postJson("/api/ticks/measure");
+        if (!response.ok) throw new Error(response.data.message);
+        tickMeasurementId = response.data.id;
+        renderTickResult(response.data);
+        for (let attempt = 0; attempt < 120; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          const poll = await fetch(`/api/ticks/${tickMeasurementId}`, { cache: "no-store" });
+          const measurement = await poll.json();
+          renderTickResult(measurement);
+          if (measurement.status !== "measuring") break;
+        }
+      } catch (error) {
+        $("ticksMessage").textContent = `量測失敗：${error.message}`;
+      } finally {
+        $("ticksMeasure").disabled = false;
+      }
+    }
+
+    async function applyTickResult() {
+      if (!tickMeasurementId) return;
+      const response = await postJson(`/api/ticks/${tickMeasurementId}/apply`, { confirm: tickConfirmArmed });
+      if (response.code === 409 && response.data.error_code === "CONFIRMATION_REQUIRED") {
+        tickConfirmArmed = true;
+        $("ticksApply").textContent = "差異超過門檻，再按一次確認套用";
+        $("ticksApply").classList.add("warn");
+        return;
+      }
+      if (!response.ok) { $("ticksMessage").textContent = `套用失敗：${response.data.message}`; return; }
+      tickConfirmArmed = false;
+      $("ticksApply").disabled = true;
+      $("ticksApply").textContent = `已套用 ${response.data.version}`;
+      $("ticksApply").classList.remove("warn");
+      if (response.data.calibration) applyState({ calibration: response.data.calibration });
+      refreshHistory();
+    }
+
+    let armedActivation = null;
+    function renderHistory(target, kind, history) {
+      const versions = [...history.versions].reverse();
+      target.replaceChildren(...versions.map((item) => {
+        const row = document.createElement("li"), label = document.createElement("span");
+        label.textContent = `${item.version}${item.active ? "（使用中）" : ""}`;
+        label.className = item.active ? "active" : "";
+        row.append(label);
+        if (!item.active) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = "設為使用中";
+          button.addEventListener("click", async () => {
+            if (armedActivation !== item.version) {
+              armedActivation = item.version;
+              button.textContent = "再按一次確認退回";
+              button.classList.add("warn");
+              return;
+            }
+            armedActivation = null;
+            const response = await postJson(`/api/calibration/${kind}/${item.version}/activate`);
+            if (response.ok) applyState({ calibration: response.data });
+            refreshHistory();
+          });
+          row.append(button);
+        }
+        return row;
+      }));
+    }
+
+    async function refreshHistory() {
+      try {
+        const response = await fetch("/api/calibration/geometry", { cache: "no-store" });
+        if (response.ok) renderHistory($("geometryHistory"), "geometry", await response.json());
+      } catch { /* offline */ }
+    }
+
+    function setTicksPreview(visible) {
+      const image = $("ticksPreview");
+      if (visible) image.src = `/api/preview.mjpg?ts=${Date.now()}`;
+      else image.removeAttribute("src");
+      image.hidden = !visible;
+      $("ticksPreviewToggle").textContent = visible ? "關閉預覽" : "顯示預覽";
+    }
+
+    $("ticksMeasure").addEventListener("click", startTickMeasurement);
+    $("ticksRemeasure").addEventListener("click", startTickMeasurement);
+    $("ticksApply").addEventListener("click", applyTickResult);
+    $("ticksPreviewToggle").addEventListener("click", () => setTicksPreview($("ticksPreview").hidden));
 
     $("reclaimMode").addEventListener("click", () => {
       const mode = ROUTE_MODES[currentRoute];

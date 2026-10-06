@@ -6,8 +6,8 @@ telemetry, captures, /api/state and /api/mode.
 """
 
 import config
-from bubble_measurement import check_undistorted_geometry
-from calibration_store import CalibrationStore
+from calibration_runtime import CalibrationRuntime
+from calibration_store import CalibrationStore, calibration_info
 from camera import create_camera
 from camera_service import CameraService
 from csv_logger import CsvLogger
@@ -15,6 +15,7 @@ from detector import YoloDetector
 from display import close_windows
 from manual_capture import CaptureManager
 from mode_manager import ModeManager
+from preview import PreviewBuffer
 from processors.align import AlignProcessor
 from processors.measure import MeasureProcessor
 from processors.ticks import TickProcessor
@@ -38,23 +39,33 @@ def ask_to_save_csv():
         print("請輸入 y（儲存）或 n（不儲存）。")
 
 
-def calibration_info(store, geometry, vial):
-    """Versions and vial constants recorded in telemetry and every LOG row."""
-    state = store.summary()
-    return {
-        "geometry_version": geometry.version,
-        "geometry_pending_confirmation": state["geometry"]["pending_confirmation"],
-        "vial_version": vial.version,
-        "alignment_version": state["alignment"]["version"] or "",
-        "mm_per_m_per_div": vial.mm_per_m_per_div,
-        "zero_offset_div": vial.zero_offset_div,
-    }
+def api_routes(manager, ticks, runtime):
+    """(method, path regex, handler(params, body) -> (status, json)) for the web server."""
+    def measure_ticks(params, body):
+        if manager.mode != "ticks":
+            return 409, {"status": "error", "error_code": "WRONG_MODE", "message": "請先切換到刻度檢查模式"}
+        return 202, ticks.request_measure()
 
+    def tick_result(params, body):
+        result = ticks.result(params["id"])
+        return (200, result) if result else (404, {"status": "error", "error_code": "NOT_FOUND",
+                                                    "message": "measurement not found"})
 
-def calibration_status(store, measure):
-    status = "unavailable" if measure.geometry is None else (
-        "pending" if measure.calibration.get("geometry_pending_confirmation") else "ok")
-    return {"status": status, **store.summary()}
+    def activate(params, body):
+        try:
+            return 200, runtime.activate(params["kind"], params["version"])
+        except FileNotFoundError as error:
+            return 404, {"status": "error", "error_code": "NOT_FOUND", "message": str(error)}
+
+    kinds, version = r"(?P<kind>geometry|vial|alignment)", r"(?P<version>[0-9A-Za-z_]{1,64})"
+    return [
+        ("POST", r"/api/ticks/measure", measure_ticks),
+        ("GET", r"/api/ticks/(?P<id>[0-9a-f]{12})", tick_result),
+        ("POST", r"/api/ticks/(?P<id>[0-9a-f]{12})/apply",
+         lambda params, body: ticks.apply(params["id"], confirm=body.get("confirm") is True)),
+        ("GET", rf"/api/calibration/{kinds}", lambda params, body: (200, runtime.history(params["kind"]))),
+        ("POST", rf"/api/calibration/{kinds}/{version}/activate", activate),
+    ]
 
 
 def run():
@@ -81,14 +92,17 @@ def run():
             telemetry.publish(payload)
 
     measure = MeasureProcessor(detector=detector, captures=captures, publish=publish, logger=logger)
+    runtime = CalibrationRuntime(store, measure, lambda: camera.undistorter if camera.camera is not None else None)
+    preview = PreviewBuffer()
+    ticks = TickProcessor(runtime=runtime, camera=camera, publish=publish, preview=preview)
     manager = ModeManager(
-        {"measure": measure, "align": AlignProcessor(publish=publish), "ticks": TickProcessor(publish=publish)},
+        {"measure": measure, "align": AlignProcessor(publish=publish), "ticks": ticks},
         on_change=lambda mode_state: publish({"type": "state", "schema_version": 1, **mode_state}),
     )
 
     def service_state():
         return {"type": "state", "schema_version": 1, **manager.state(),
-                "calibration": calibration_status(store, measure),
+                "calibration": runtime.status(),
                 "camera": {"open": camera.camera is not None, "open_count": camera.open_count,
                            "frame_id": camera.frame_id,
                            "focus_absolute": getattr(camera.camera, "focus_absolute", None)},
@@ -105,6 +119,8 @@ def run():
                 capture_manager=captures,
                 state_provider=service_state,
                 mode_handler=manager.request,
+                routes=api_routes(manager, ticks, runtime),
+                preview=preview,
             )
             telemetry.start()
             print("WebSocket遙測已啟動：")
@@ -121,22 +137,20 @@ def run():
     try:
         camera.open()
         print("相機已啟動。")
+        status = runtime.reload()
+        geometry, vial = measure.geometry, measure.vial
         if geometry is not None:
-            try:
-                check_undistorted_geometry(geometry.image_geometry, camera.undistorter,
-                                           (config.ROI_X1, config.ROI_Y1))
-                scale_center = geometry.zero_x_roi()
-                print(
-                    f"幾何校正 {geometry.version}（{geometry.polynomial_degree} 次）："
-                    f"center={scale_center:.3f}px, pitch={geometry.px_per_div(scale_center):.3f}px/div；"
-                    f"水平儀校正 {vial.version}：{vial.mm_per_m_per_div:.5f} mm/m/div，"
-                    f"零點 {vial.zero_offset_div:+.3f} div"
-                )
-                if calibration["geometry_pending_confirmation"]:
-                    print("注意：幾何校正待確認（相機可能動過），請重做刻度檢查。")
-                measure.set_calibration(geometry, vial, calibration)
-            except (KeyError, TypeError, ValueError) as error:
-                print(f"警告：幾何校正與相機參數不符，僅執行YOLO：{error}")
+            scale_center = geometry.zero_x_roi()
+            print(
+                f"幾何校正 {geometry.version}（{geometry.polynomial_degree} 次）："
+                f"center={scale_center:.3f}px, pitch={geometry.px_per_div(scale_center):.3f}px/div；"
+                f"水平儀校正 {vial.version}：{vial.mm_per_m_per_div:.5f} mm/m/div，"
+                f"零點 {vial.zero_offset_div:+.3f} div"
+            )
+            if status["status"] == "pending":
+                print("注意：幾何校正待確認（相機可能動過），請重做刻度檢查。")
+        elif config.ENABLE_BUBBLE_MEASUREMENT:
+            print(f"警告：校正檔無法使用（{status['error']}），僅執行YOLO。")
         print("按q或Ctrl+C結束。")
 
         while not manager.step(camera):

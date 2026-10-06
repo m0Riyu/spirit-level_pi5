@@ -74,6 +74,12 @@ class StoreTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 VialCalibration("v_vial", gain, zero)
 
+    def test_version_names_never_collide(self):
+        stamp = datetime(2026, 10, 7, 1, 0, 0, tzinfo=TIMEZONE)
+        first = self.store.new_version("vial", stamp)
+        self.store.save("vial", {"version": first, "mm_per_m_per_div": .02, "zero_offset_div": 0.})
+        self.assertEqual((first, self.store.new_version("vial", stamp)), ("20261007T010000_vial", "20261007T010001_vial"))
+
     def test_version_names_use_taipei_time(self):
         stamp = datetime(2026, 10, 6, 10, 40, tzinfo=TIMEZONE)
         self.assertEqual(new_version("geometry", stamp), "20261006T104000_geometry")
@@ -95,6 +101,49 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual((vial.mm_per_m_per_div, vial.zero_offset_div), (.0228336, .4267))
             data, _ = store.load("vial")
             self.assertEqual(data["source_session"], "20261002_145946_64bcd440")
+            self.assertEqual(data["cross_validation_leave_one_angle_out"], {"max_abs_deg": .00024})
+
+    def test_geometry_from_images_is_stored_inactive_with_camera_geometry(self):
+        import cv2
+        from test_tick_detection import synthetic_roi
+        with tempfile.TemporaryDirectory() as directory:
+            images = []
+            for seed in range(3):
+                images.append(Path(directory) / f"roi_{seed}.png")
+                cv2.imwrite(str(images[-1]), synthetic_roi(center=372.3, seed=seed))
+            root = Path(directory) / "calibration"
+            store = CalibrationStore(root)
+            store.save("geometry", {"version": "20261002T072923_geometry", "polynomial_degree": 1,
+                                    "x_center_px": 370.25, "coefficients_x_to_div": [0., 1 / 18.]})
+            with contextlib.redirect_stdout(io.StringIO()):
+                migrate_calibration.main(["geometry-images", *map(str, images), "--stamp", "20261002T145946",
+                                          "--focus", "3711", "--root", str(root)])
+            self.assertEqual(store.active_state("geometry")["version"], "20261002T072923_geometry")
+            data, _ = store.load("geometry", "20261002T145946_geometry")
+            self.assertAlmostEqual(data["x_center_px"], 372.3, delta=.2)
+            self.assertEqual((data["frames_used"], data["focus_absolute"], data["polynomial_degree"]), (3, 3711, 2))
+            self.assertEqual(data["previous_version"], "20261002T072923_geometry")
+            self.assertIn("new_camera_matrix", data["image_geometry"])
+
+    def test_ends_fit_vial_is_stored_inactive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            summary = Path(directory) / "summary.json"
+            summary.write_text(json.dumps({
+                "session": "s", "labeled_captures": 13, "reference_angles": 10, "method_A_current_system": {},
+                "method_B_yolo_calibrated_cv": {}, "method_E_session_geometry_ends_cv": {"max_abs_deg": .00024},
+                "session_geometry": {"fits": {"2": {"x_center_px": 372.27}}},
+                "calibration_all_points": {"yolo": {"mm_per_m_per_div": .0228, "zero_offset_div": .43},
+                                           "yolo_ends_session_geometry": {"mm_per_m_per_div": .02285, "zero_offset_div": .317}}}))
+            root = Path(directory) / "calibration"
+            with contextlib.redirect_stdout(io.StringIO()):
+                migrate_calibration.main(["vial", "--summary", str(summary), "--root", str(root)])
+                migrate_calibration.main(["vial", "--summary", str(summary), "--fit", "yolo_ends_session_geometry",
+                                          "--root", str(root)])
+            store = CalibrationStore(root)
+            self.assertEqual(store.load_vial().zero_offset_div, .43)  # the ends fit did not activate
+            inactive = [item for item in store.versions("vial") if not item["active"]]
+            data, _ = store.load("vial", inactive[0]["version"])
+            self.assertEqual((data["zero_offset_div"], data["geometry_basis"]["x_center_px"]), (.317, 372.27))
             self.assertEqual(data["cross_validation_leave_one_angle_out"], {"max_abs_deg": .00024})
 
     @unittest.skipUnless(migrate_calibration.LEGACY_TICK_MEASUREMENT.is_file(), "legacy tick JSON not present")

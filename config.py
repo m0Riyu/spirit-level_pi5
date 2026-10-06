@@ -56,6 +56,22 @@ CAMERA_LOCK_PATH = Path("/tmp/levelsvc-camera.lock")
 ENABLE_BUBBLE_MEASUREMENT = True
 CALIBRATION_DIRECTORY = PROJECT_DIRECTORY / "calibration"
 
+# ③ tick check: detection in the rectified ROI, fit, and acceptance checks.
+TICK_BAND_Y1, TICK_BAND_Y2 = 55, 105  # ROI rows crossed by every tick
+TICK_KERNEL_WIDTH_PX = 9              # black-hat kernel; wider than a tick line
+TICK_PEAK_FRACTION = 0.25             # peak threshold between median and top
+TICK_LOGO_HALF_WIDTH_PX = 65          # RSK logo gap around the scale center
+TICK_MATCH_TOLERANCE = 0.25           # fraction of pitch when following ticks
+TICK_EXPECTED_PER_SIDE = 13
+TICK_NOMINAL_PITCH_PX = 18.0          # starting pitch when no geometry exists
+TICK_MIN_FRAME_FRACTION = 0.5         # a tick must be found in half the frames
+TICK_MEASURE_FRAMES = 20
+GEOMETRY_POLYNOMIAL_DEGREE = 2        # 1-3
+TICK_MAX_RESIDUAL_RMS_PX = 0.5
+TICK_MAX_PITCH_CHANGE = 0.03          # vs the active version; above needs confirmation
+PREVIEW_MAX_FPS = 5
+PREVIEW_JPEG_QUALITY = 60
+
 # Web dashboard and WebSocket telemetry. Open http://<Pi IP>:8100 on a phone
 # connected to the same network. The WebSocket endpoint is ws://<Pi IP>:8865.
 ENABLE_WEBSOCKET = True
