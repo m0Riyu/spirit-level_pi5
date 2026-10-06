@@ -16,11 +16,20 @@
 >
 > 本文件中的 `my_project/...` 相對路徑，一律指 `my_project_V2/...`。
 >
+> **原目錄 git 的特殊狀態（2026-10-06 確認，不要「修正」它）：**
+> `/home/user/my_project/live_yolo1_app` 的 git 就是 GitHub repo `m0Riyu/spirit-level_pi5`。
+> 它目前停在 `main`，而 `main` 只保存 `my_project/` 快照；`.git/info/exclude` 以 `/*`、
+> `!/my_project/` 讓程式檔不被追蹤。硬碟上的程式檔與分支 `feature/websocket-dashboard`
+> （`a528535`，程式內容等同實際執行的 `f86c567`）逐檔 hash 相同。程式可正常執行。
+> 對這個目錄執行 `git pull` / `switch` / `checkout` / `reset` / `stash` / `clean`
+> 可能會覆蓋或刪除這些被忽略的程式檔。
+>
 > 工作規則：
-> 1. 原目錄 `/home/user/my_project` 不可修改；其中 `live_yolo1_app` 的 git 若有未 commit
->    的修改，先回報使用者。
-> 2. V2 的 `live_yolo1_app` 以 `git clone` 從原目錄建立（保留歷史），開分支
->    `feature/integrated-modes` 開發。
+> 1. 原目錄 `/home/user/my_project` 不可修改。**禁止在原目錄內執行任何會改變狀態的 git
+>    指令**（`pull`、`switch`、`checkout`、`reset`、`stash`、`clean`、`commit`、`merge`）；
+>    只允許 `status`、`log`、`show`、`diff`、`ls-tree`、`hash-object` 這類唯讀指令。
+> 2. V2 的 `live_yolo1_app` 從 GitHub 的 `feature/websocket-dashboard` 分支 clone（保留歷史），
+>    開分支 `feature/integrated-modes` 開發。推送到 GitHub 前先徵求使用者同意。
 > 3. 停止、重啟相機程式或 systemd 服務前，必須先詢問使用者。新舊版共用同一顆相機，
 >    不能同時執行；使用相機前要由使用者確認舊版已停止。
 > 4. `logs/`、`capture_requests.sqlite3`、既有量測資料只讀不改。
@@ -360,10 +369,14 @@ WebSocket 訊息加上 `type` 欄位：`telemetry`（既有）、`align`、`tick
 每個階段結束都要：所有測試通過 → commit → 回報使用者。
 
 ### P0 準備（建立 V2）
-- 比對原目錄 `/home/user/my_project` 與 GitHub 快照 `/home/user/spirit-level_pi5/my_project`
-  的程式差異並回報（以原目錄為準）。
+- 確認原目錄程式檔仍與 `feature/websocket-dashboard` 逐檔相同（只用 `git ls-tree` 與
+  `git hash-object` 比對，不得切換分支）；有差異時回報，並以硬碟上的檔案為準。
 - 建立 `/home/user/my_project_V2`，**執行前先列出要複製的內容與預估大小，給使用者確認**：
-  - `live_yolo1_app/`：`git clone /home/user/my_project/live_yolo1_app`，開分支 `feature/integrated-modes`。
+  - `live_yolo1_app/`：
+    `git clone -b feature/websocket-dashboard https://github.com/m0Riyu/spirit-level_pi5.git /home/user/my_project_V2/live_yolo1_app`，
+    開分支 `feature/integrated-modes`。第一個 commit 移除快照與備份產物：
+    `my_project/`、`backups/`、`MY_PROJECT_LAYOUT_MANIFEST.json`、`MY_PROJECT_LAYOUT_README.md`、
+    `MY_PROJECT_BACKUP_REVIEW.md`（它們屬於 `main` 的備份用途，不是程式）。
   - 從原目錄複製：`best_128x608_ncnn_model/`、`live_yolo1_app_judy_a/` 中使用中的校正檔、
     `binary_stream_tuner_project/`（不含大量 logs）。
   - 從 GitHub 快照複製：`ARCHITECTURE_SPEC.md`、`calibration_test/`。
