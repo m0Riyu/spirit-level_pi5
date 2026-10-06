@@ -1,1 +1,13 @@
-websockets>=14,<16
+# Installed into a venv created with --system-site-packages: torch, torchvision,
+# numpy, picamera2 and libcamera come from Raspberry Pi OS. Install with
+#   .venv/bin/python -m pip install --no-deps -r requirements.txt
+# (--no-deps keeps pip from pulling a second torch/sympy over the system ones).
+websockets==15.0.1
+ultralytics==8.4.115
+ultralytics-thop==2.2.2
+ncnn==1.0.20260526
+opencv-python==5.0.0.93
+polars==1.44.2
+polars-runtime-32==1.44.2
+portalocker==4.4.0
+nvidia-ml-py==13.615.71

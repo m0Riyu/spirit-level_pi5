@@ -1,19 +1,251 @@
-# 相機刻度量測系統
+# 水平儀視覺量測系統 V2（levelsvc）
 
-目前版本：[第一版 B版](VERSION.md)，Git 標記 `v1-b`。
+單一 systemd 服務、手機網頁操作。三個功能共用同一顆相機（只開一次，對焦固定 VCM 3711、同一份去畸變與 ROI）：
 
-本工作目錄以 `feature/websocket-dashboard` / `v1-b` / `543ab05` 為基礎，
-新增手機單次紀錄；`v1-b` 標記仍指向原版。新功能操作與完整 LOG 規格見
-[手機單次拍攝與兩端 LOG](#手機單次拍攝與兩端-log)。
+| # | 功能 | 用途 |
+|---|---|---|
+| ① | 量測 | YOLO 氣泡 → 兩層校正 → 斜率／角度；手機觸發連拍記錄（可輸入參考值） |
+| ② | 相機對位 | AprilTag 量相機角度，引導轉彈簧螺絲回到基準姿態 |
+| ③ | 刻度檢查 | 多幀量測刻度，更新「像素 → 格數」幾何校正 |
+| ⚙ | 系統 | 狀態、重啟服務／重新開機／關機（PIN）、LOG 下載 |
+
+**固定流程：② 相機對位 → ③ 刻度檢查 → ① 量測。** 相機只要動過就要重做 ③；
+③ 重新確認前，① 會顯示黃色「幾何校正待確認」橫幅（仍可量測）。
+
+設計與決策的完整說明見 [ARCHITECTURE_SPEC.md](../ARCHITECTURE_SPEC.md)（V2 根目錄）。
+本文件後半段「V1 參考文件」保留舊版的細節說明（YOLO、調參工具、手動拍攝 LOG 欄位），其中與 V2 不同之處已標註。
+
+## 快速開始
+
+```bash
+# 服務（以一般使用者 user 執行；預設不開機自動啟動）
+sudo systemctl start levelsvc          # 啟動
+sudo systemctl stop levelsvc           # 停止
+systemctl status levelsvc              # 狀態
+journalctl -u levelsvc -f              # 即時記錄
+sudo systemctl enable levelsvc         # 需要時才設定開機自動啟動
+```
+
+手機與 Pi 連同一網路，開啟 `http://<Pi IP>:8100`（WebSocket `ws://<Pi IP>:8865`）。
+開發中的 V2 使用 8100 / 8865，避免與舊版的 8000 / 8765 衝突。
+
+**舊版（`/home/user/my_project`）與 levelsvc 共用相機，不能同時執行。** 要用舊版前先 `sudo systemctl stop levelsvc`。
+V2 的服務與除錯工具（`apriltag_measurement.py`、調參工具）彼此以相機鎖 `/tmp/levelsvc-camera.lock` 互斥：
+有程式正在使用相機時，其他程式會顯示「相機正被其他程式使用」並結束；舊版沒有這個鎖，要自行確認。
+
+不經 systemd、手動執行（除錯用）：
+
+```bash
+cd /home/user/my_project_V2/live_yolo1_app
+.venv/bin/python main.py                              # Ctrl+C 結束
+LEVELSVC_SYSTEM_DRY_RUN=1 .venv/bin/python main.py    # 關機／重開機指令只印出、不執行
+```
+
+### 安裝（新機器或重建）
+
+```bash
+cd /home/user/my_project_V2/live_yolo1_app
+python3 -m venv --system-site-packages .venv
+.venv/bin/python -m pip install --no-deps -r requirements.txt   # torch、numpy、picamera2 用系統內建
+sudo cp deploy/levelsvc.service /etc/systemd/system/ && sudo systemctl daemon-reload
+sudo visudo -cf deploy/levelsvc.sudoers && sudo install -m 0440 deploy/levelsvc.sudoers /etc/sudoers.d/levelsvc
+sudo install -d -m 0755 /etc/levelsvc
+echo 'LEVELSVC_PIN=<自訂數字>' | sudo tee /etc/levelsvc/env >/dev/null && sudo chmod 0600 /etc/levelsvc/env
+```
+
+- `sudoers` 只開放 `systemctl poweroff`、`reboot`、`restart levelsvc` 三個指令；服務本身不以 root 執行。
+- PIN 只存在 `/etc/levelsvc/env`（root 才能讀，不進 git）。未設定時，電源與退回校正功能會停用。
+- 校正檔在 `my_project_V2/calibration/`、LOG 在 `my_project_V2/logs/`，兩者都不在 git 內，請另行備份。
+
+## 操作流程
+
+### 主選單與狀態列
+
+`#/` 主選單：① 量測 ② 相機對位 ③ 刻度檢查 ⚙ 系統。進入 ①②③ 頁面時，服務會自動切換到該模式
+（不重開相機，切換約一幀的時間）。多支手機同時連線時以最後切換的為準，其他手機會顯示「模式已被其他裝置切換」，
+可按「切回此模式」。頂部狀態列顯示目前模式、校正狀態（正常／待確認／未載入）與 CPU 溫度。
+
+只有 ① 執行 YOLO；② ③ 不跑 YOLO。預覽影像只在 ② ③ 提供（MJPEG、最多 5 fps、按「顯示預覽」才開始，可關閉）。
+
+### ② 相機對位
+
+1. 大字顯示 Pitch、Yaw 與**基準**的差值（10 幀移動平均）與讀值雜訊；綠色在容許範圍（±0.10°）內、紅色在範圍外。
+   Roll 顯示但機構無法調整，僅供參考。尚未設定基準時顯示絕對角度。
+2. **螺絲教學**（第一次或更換相機座後）：螺絲 A 按「開始」→ 順時針轉 1/4 圈 → 按「完成」；B 相同。
+   系統記錄每顆螺絲每圈造成的角度變化，建立 2×2 靈敏度矩陣。
+3. **引導**：依矩陣換算每顆螺絲該轉的方向與圈數（取最接近的 1/8 圈），例如「螺絲 A　順時針 約 1/4 圈」，在範圍內顯示 ✓。
+4. Pitch、Yaw 都在範圍內並持續 3 秒，「完成對位」才能按；進入範圍時手機震動（iOS 不支援，只有提示音）。
+5. 「完成對位」寫入 `logs/alignment/<時間>_alignment_log.json`（調整前後角度），並把幾何校正設為「待確認」，提示前往 ③。
+6. 「設為新基準」（PIN＋二次確認）：只在系統完整校正、量測驗證後使用。目標是**回到基準角度，不是歸零**
+   （AprilTag 所在的玻璃面與水平儀管不一定平行）。
+
+靜止時的實測雜訊（960×540、4 個 tag）：單幀 Pitch 0.014° / Yaw 0.012°；10 幀平均的波動約 0.02°（主要為 1–3 秒尺度的低頻抖動）。
+
+### ③ 刻度檢查
+
+1. 預覽中綠線為偵測到的刻度。量測時氣泡要靜止，且不要遮住刻度。
+2. 按「量測」：取 20 幀，每條刻度取中位數位置 → 2 次多項式擬合 → 檢查。結果：
+
+   | 項目 | 門檻 |
+   |---|---|
+   | 刻度數 | 26 / 26 |
+   | 擬合殘差 RMS | < 0.5 px |
+   | 中心處 px/格 與目前版本差異 | < 3%（超過時需再按一次確認才能套用） |
+   | 刻度中心位移、左右放大率差、由刻度線傾斜推得的 Roll | 顯示供參考 |
+
+3. 刻度數不足時會提示「刻度被氣泡邊緣遮住，請稍微傾斜水平儀後重試」。
+4. 「套用為新版本」：寫入新的 geometry 版本並立即生效（不需重啟），解除「待確認」。
+5. 「歷史版本」可把任一舊版本設為使用中（退回，需 PIN＋二次確認）。
+
+### ① 量測
+
+- 坡度 = (氣泡格數 − 零點) × 每格 mm/m（兩層校正，見下節）。上方示意圖與格數顯示的是**相對水平點**（已扣零點）的位置。
+- 「記錄並拍照」：一次觸發連拍 N 幀（預設 15，1–30），每幀一列 CSV，共用 `burst_id`，另加一列彙總（中位數、標準差），
+  並另存一張**去畸變前**的完整畫面 PNG（無損，可事後重新處理）。每次約 2 MB，系統頁顯示剩餘可拍次數。
+- 展開「參考值與連拍」可輸入 DL-S4W 讀值、A 軸設定值、掃描方向（正向／反向／零點檢查）、備註與連拍幀數。
+  **參考值會保留到下次修改**，每個量測點記錄前請更新；保存成功的訊息會顯示這次送出的參考值。
+- 離開 ① 模式時，尚未完成的連拍會以 `MODE_CHANGED` 結束（不會留下不完整的紀錄）。
+
+### ⚙ 系統
+
+- 狀態：模式、相機（開啟次數、對焦）、三種校正的使用中版本、CPU 溫度、負載、磁碟剩餘、剩餘可拍次數、服務執行時間、程式版本。
+- 重啟服務、重新開機（PIN＋按兩次確認）、關機（PIN＋長按 2 秒）。PIN 連續錯 5 次鎖定 60 秒。
+- **安全關機順序**：停止接收拍攝 → 等寫檔完成 → 停止處理迴圈並關閉相機 → 手機顯示「可以斷電」→ 執行 `systemctl poweroff`。
+  看到「可以斷電」後約 20 秒系統關機完成，再拔電。
+- LOG 下載：每個 session 打包成 zip（CSV、metadata、影像，以及該 session 用到的所有校正檔版本）。
+
+## 校正檔
+
+兩層校正，分開保存、各自版本管理：
+
+```text
+影像幾何（③，相機動過就重做）              水平儀物理（CNC，換水平儀管才重做）
+氣泡兩端 x1, x2 ──→ f(x1), f(x2) ──平均──→ offset_div ──→ slope = (offset_div − zero_offset_div) × mm_per_m_per_div
+                    f(x) = Σ cᵢ (x − x_center)ⁱ            angle = atan(slope / 1000)
+```
+
+- 幾何：26 條刻度 `x_k` 對應 `±(k + h)` 格（左負右正，`h` 由擬合求出），全部刻度一起做最小平方法。
+  氣泡用 YOLO 框的兩端（落在有刻度的區域，是內插），不用中心（落在無刻度的 RSK 標誌區）。
+- 水平儀：倍率與零點是相對於**刻度中心**定義的，所以相機調整不影響它們；但擬合時必須搭配同一時間量到的幾何。
+
+```text
+my_project_V2/calibration/
+├── geometry/   <時間>_geometry.json（+ _roi.png）、active.json
+├── vial/       <時間>_vial.json、active.json
+└── alignment/  <時間>_alignment.json（基準角度＋螺絲模型）、active.json
+```
+
+- 每次更新都產生新檔、舊檔不改；`active.json` 記錄使用中的版本與 `pending_confirmation`（待確認）。退回只是改指向。
+- 每筆 LOG 與 `session_metadata.json` 都記錄當下三種校正的版本。
+- `migrate_calibration.py`（命令列工具，預設存成未啟用的新版本）：
+
+  ```bash
+  .venv/bin/python migrate_calibration.py geometry                      # 舊 binary_*_tick_measurement.json → 第一版（1 次，等同舊公式）
+  .venv/bin/python migrate_calibration.py geometry-images IMG... --stamp 20261002T145946 --focus 3711   # 由已存 ROI 影像擬合
+  .venv/bin/python migrate_calibration.py vial --summary ../calibration_test/output/summary.json --fit yolo_ends_session_geometry
+  ```
+
+## 現場量測流程（CNC ＋ DL-S4W）
+
+只有一次機台機會時，目標是把事後修正需要的資料一次收齊，並在離開前確認資料完整。
+
+1. 暖機 30 分鐘；確認對焦（啟動記錄顯示 3711/3711）與畫面（⚙ 或 ② ③ 預覽）。
+2. ② 確認相機姿態在基準範圍內 → ③ 刻度檢查並套用（狀態列「校正」顯示「正常」）。
+3. 零點：A 軸 0 位置，掃描方向選「零點檢查」，記錄；可以的話把水平儀轉 180° 再記錄一次（反轉法）。
+4. 正向掃描：約 −0.0065° → +0.0065°，每 0.0005° 一點；每點等氣泡穩定（約 30 秒，「氣泡穩定度」顯示穩定）後，
+   **先填 A 軸設定值與 DL-S4W 讀值**，掃描方向選「正向」，再按「記錄並拍照」（連拍 15 幀）。
+5. 反向掃描：相同的點走回，掃描方向選「反向」。
+6. 開始、中間、結束各做一次零點檢查（觀察漂移）。
+7. 兩端各多量 1–2 點超出量程的位置。
+8. **離開前**在 Pi 上分析（參考值直接從 CSV 讀取）：
+
+   ```bash
+   cd /home/user/my_project_V2/calibration_test
+   ../live_yolo1_app/.venv/bin/python run_log_test.py ../logs/manual_captures/<session>
+   ```
+
+   看 `output/summary.json` 的交叉驗證誤差；正向用來校正、反向用來驗證；有缺漏或離群點當場補拍。
+   要更新水平儀校正時再用 `migrate_calibration.py vial --summary ... --fit yolo_ends_session_geometry --activate`。
+
+事後可以修正：倍率、零點、非線性、偵測演算法、剔除未穩定的幀。
+事後無法補救：缺少參考值、對焦或曝光不良、拍攝中途相機被碰動、點數不足、沒有保留驗證資料。
+
+## LOG 新增欄位（V2）
+
+`pi_capture_log.csv` 在 V1 欄位之後新增：
+
+| 欄位 | 說明 |
+|---|---|
+| `row_type` | `frame`（每幀一列）或 `summary`（連拍彙總，連拍 1 幀時沒有） |
+| `burst_id` `burst_index` `burst_size` | 同一次觸發共用 `burst_id`（＝`record_id`）；`sample_id` 以觸發計數 |
+| `reference_deg` `a_axis_deg` `sweep_direction` `note` | 手機輸入的現場參考值 |
+| `raw_image_path` `raw_frame_id` | 去畸變前完整畫面 PNG（連拍第一幀） |
+| `geometry_version` `geometry_pending_confirmation` `vial_version` `alignment_version` `mm_per_m_per_div` `zero_offset_div` | 當下使用的校正 |
+| `burst_valid_count` `burst_median_*` `burst_std_*` | 彙總列：坡度、角度、格數、氣泡中心的中位數與標準差 |
+
+影像檔名：`<record_id>_<幀序>_clean.jpg`、`_annotated.jpg`、`<record_id>_raw.png`。
+WebSocket telemetry 維持既有欄位的意義，新增 `mode`、`calibration`、`measurement.level_offset_div`（扣零點後的格數）。
+
+## API 一覽
+
+| 方法 | 路徑 | 說明 |
+|---|---|---|
+| GET | `/api/state` | 模式、校正狀態、相機、系統摘要 |
+| POST | `/api/mode` | `{"mode": "measure" \| "align" \| "ticks", "client_id": "..."}` |
+| GET | `/api/preview.mjpg` | 預覽（只在 ② ③） |
+| POST | `/api/captures` | `{"request_id", "reference_deg"?, "a_axis_deg"?, "sweep_direction"?, "note"?, "burst_frames"?}` |
+| GET | `/api/captures/ready`、`/api/captures/{id}` | 拍攝狀態（`ready` 另含 `storage`、`burst_frames_default`） |
+| GET | `/api/align` | ② 目前狀態 |
+| POST | `/api/align/teach/{A\|B}/{start\|finish}`、`/api/align/complete` | 螺絲教學、完成對位 |
+| POST | `/api/align/baseline` | 設為新基準（PIN，`{"confirm": true}`） |
+| POST | `/api/ticks/measure` → GET `/api/ticks/{id}` → POST `/api/ticks/{id}/apply` | ③ 量測、結果、套用（`{"confirm": true}` 用於差異 > 3%） |
+| GET | `/api/calibration/{geometry\|vial\|alignment}` | 歷史版本 |
+| POST | `/api/calibration/{kind}/{version}/activate` | 退回指定版本（PIN） |
+| GET | `/api/system/status` | 系統狀態 |
+| POST | `/api/system/{restart-service\|reboot\|shutdown}` | 需 PIN |
+| GET | `/api/logs/sessions`、`/api/logs/sessions/{id}.zip` | LOG 列表與下載 |
+
+PIN 以 HTTP header `X-Levelsvc-Pin` 傳送。WebSocket 訊息以 `type` 區分：`telemetry`、`align`、`ticks`、`state`。
+
+## 程式結構
+
+| 模組 | 角色 |
+|---|---|
+| `main.py` → `app.py` | 入口；組裝元件、啟動與關閉順序 |
+| `camera.py` | 共用相機模組（對焦、去畸變、相機鎖）；服務與除錯工具都經由它開相機 |
+| `camera_service.py` | 唯一持有相機；每幀提供原始、去畸變全畫面與 ROI |
+| `mode_manager.py` | 同一時間一個處理器，切換發生在兩幀之間 |
+| `processors/measure.py` `align.py` `ticks.py` | ① ② ③ |
+| `calibration_store.py` `calibration_runtime.py` | 校正檔版本管理；載入、與相機比對、套用、退回 |
+| `geometry_calibration.py` `tick_detection.py` `alignment.py` | 幾何多項式與擬合、刻度偵測、對位數學 |
+| `manual_capture.py` | 手機觸發、連拍、寫檔與冪等 |
+| `telemetry_server.py` `preview.py` `dashboard/` | HTTP / WebSocket / MJPEG 與網頁 |
+| `system_controller.py` | 系統狀態、PIN、安全關機、LOG 打包 |
+| `deploy/` | systemd 服務檔與 sudoers |
+
+## 測試
+
+```bash
+cd /home/user/my_project_V2/live_yolo1_app
+.venv/bin/python -m unittest discover -v                      # 全部（含 Chromium 網頁測試，不使用相機）
+cd ../binary_stream_tuner_project/live_yolo1_app && ../../live_yolo1_app/.venv/bin/python -m unittest test_undistortion
+```
+
+---
+
+# V1 參考文件
+
+以下為 V1（`feature/websocket-dashboard` / `v1-b`）的說明，演算法與 LOG 欄位的細節仍然適用；
+與 V2 不同的地方已加上「V2：」註記。
 
 ## YOLO 氣泡位置量測
 
 執行：
 
 ```bash
-cd /home/user/my_project/live_yolo1_app
+cd /home/user/my_project_V2/live_yolo1_app
 python3 -m venv --system-site-packages .venv
-.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install --no-deps -r requirements.txt
 .venv/bin/python main.py
 ```
 
@@ -42,6 +274,9 @@ OpenCV 回傳的裁切區。ROI 在去畸變後才擷取，後續影像座標皆
 映射表只在相機啟動時建立，逐幀使用 `remap`；校正檔缺失、無效或與
 960 × 540 尺寸不符時，會停止啟動並釋放相機。
 
+V2：以下為 V1 的換算。V2 改用 `calibration/` 的兩層校正（geometry 多項式＋氣泡兩端、vial 倍率與零點），
+見前面的「校正檔」一節；舊刻度 JSON 只作為 `migrate_calibration.py geometry` 的輸入。
+
 刻度校正 JSON 的 `reference_midpoint_x` 是刻度零點，
 `global_pitch.pitch_px` 是每格像素數。程式會辨識座標系：
 
@@ -69,7 +304,7 @@ CSV 都會輸出去畸變座標中的偏移像素與校正格數；校正 JSON �
 啟動 `main.py` 後，終端會印出接收端網址，例如：
 
 ```text
-http://192.168.50.46:8000
+http://192.168.50.38:8100
 ```
 
 手機和 Raspberry Pi 連到同一個網路後，直接以瀏覽器開啟該網址。
@@ -79,7 +314,7 @@ http://192.168.50.46:8000
 - 系統狀態。
 - 坡度、像素位移及傾斜角度。
 
-WebSocket 位址為 `ws://<Pi IP>:8765`。傳輸採用 JSON schema version 1；
+WebSocket 位址為 `ws://<Pi IP>:8865`（V2；V1 為 8765）。傳輸採用 JSON schema version 1；
 網頁斷線後會自動重新連線，且網路傳送不會阻塞相機推論。
 氣泡量測每幀更新；摺疊的效能資訊每 0.5 秒刷新，傳輸效率採最近
 3 秒平均，其餘時間採最近 30 幀中位數，避免單幀波動造成數字快速
@@ -224,7 +459,7 @@ python3 live_yolo1_app/binary_stream_tuner.py
 
 - 二值化設定：C、Block Size、Morph Kernel。
 - 手動曝光：曝光時間、類比增益、亮度、對比。
-- 白平衡／焦距：白平衡模式與鏡頭位置。
+- 白平衡／焦距：白平衡模式與鏡頭位置。V2：鏡頭位置已移除，對焦固定為 VCM `focus_absolute` 3711（與量測服務相同）。
 
 按「儲存目前畫面」或鍵盤 `s`，會另外保存：
 
@@ -418,8 +653,8 @@ cd /home/user/my_project/live_yolo1_app
 .venv/bin/python main.py
 ```
 
-手機與 Pi 連同一網路，開啟終端印出的 `http://<Pi IP>:8000`。
-WebSocket 為 `ws://<Pi IP>:8765`。先展開「氣泡穩定度」，等待顯示「穩定」，
+手機與 Pi 連同一網路，開啟終端印出的 `http://<Pi IP>:8100`（V2；V1 為 8000）。
+WebSocket 為 `ws://<Pi IP>:8865`。先展開「氣泡穩定度」，等待顯示「穩定」，
 按「記錄並拍照」，確認「已配對」筆數增加；實驗結束按「匯出手機端 LOG」。
 量測操作區只保留兩個按鈕與手機紀錄筆數，採用緊湊排列；失敗訊息顯示在筆數列，
 record_id 保存在兩端 LOG，不另外占用頁面列。
@@ -452,7 +687,7 @@ JPEG_QUALITY = 95
 
 ```text
 手機：先將按下當下的純數值保存至 IndexedDB，產生 request_id
-  → POST /api/captures（只有 request_id）
+  → POST /api/captures（request_id；V2 另可附參考值與連拍幀數）
 HTTP thread：驗證、冪等查詢、加入有界 request queue
 主迴圈：在每次 capture_roi() 前取出當時已排入的要求
   → 擷取原有一幀 → 全畫面去畸變 → 740×160 ROI → YOLO
@@ -541,7 +776,7 @@ Content-Type: application/json
 ```
 
 首次接受回 `202`。JSON/UUID 錯誤 `400`，queue 滿 `429`，工作數達上限 `409`，
-相機或保存服務未準備完成 `503`。只接受 request_id，其他欄位一律 `400`。
+相機或保存服務未準備完成 `503`。V1 只接受 request_id；V2 另接受 `reference_deg`、`a_axis_deg`、`sweep_direction`、`note`、`burst_frames`，未知欄位或格式錯誤一律 `400`。
 相同 UUID 回既有狀態，pending 回 `202`，其餘既有狀態回 `200`。
 
 ```http
