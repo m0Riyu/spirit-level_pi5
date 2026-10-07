@@ -6,6 +6,8 @@ geometry polynomial and checks it against the active version. Applying saves a
 new geometry version and reloads the measurement processor (no restart).
 """
 
+import collections
+import statistics
 import threading
 import time
 import uuid
@@ -52,10 +54,14 @@ class TickProcessor:
         self._results = {}  # bounded: last few measurements
         self._next_publish = 0.0
         self._last = None
+        # Live roll: one frame's tick lean is noisy (~0.14°); show the median of
+        # the same number of frames a measurement uses.
+        self._recent_rolls = collections.deque(maxlen=self.frames_target)
 
     # ---- mode lifecycle -------------------------------------------------
     def enter(self):
         self._next_publish = 0.0
+        self._recent_rolls.clear()
         if self.preview is not None:
             self.preview.set_source(self.mode)
 
@@ -119,6 +125,8 @@ class TickProcessor:
         prior_center, prior_pitch = self._prior()
         ticks = detect_ticks(frame.roi, prior_center, prior_pitch)
         self._last = ticks
+        if ticks.roll_deg is not None:
+            self._recent_rolls.append(ticks.roll_deg)
         finished = None
         with self._lock:
             current = self._current
@@ -143,7 +151,8 @@ class TickProcessor:
                           "tick_count": ticks.count(), "left_count": ticks.count("left"),
                           "right_count": ticks.count("right"),
                           "expected_tick_count": 2 * config.TICK_EXPECTED_PER_SIDE,
-                          "roll_deg": ticks.roll_deg, "measurement": measuring,
+                          "roll_deg": statistics.median(self._recent_rolls) if self._recent_rolls else None,
+                          "roll_frames": len(self._recent_rolls), "measurement": measuring,
                           "finished": finished.as_dict() if finished is not None else None})
         return False
 

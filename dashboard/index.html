@@ -1098,7 +1098,7 @@
       if (data.type === "align") { renderAlign(data); return; }
       const progress = data.measurement ? ` · 量測中 ${data.measurement.frames_collected} / ${data.measurement.frames_target} 幀` : "";
       $("ticksStatus").textContent = `即時偵測 ${data.tick_count} / ${data.expected_tick_count} 條刻度` +
-        ` · Roll ${number(data.roll_deg, 2, "°", true)}${progress}`;
+        ` · Roll ${number(data.roll_deg, 2, "°", true)}（最近 ${data.roll_frames ?? "—"} 幀中位數）${progress}`;
       if (data.finished && data.finished.id === tickMeasurementId) renderTickResult(data.finished);
     }
 

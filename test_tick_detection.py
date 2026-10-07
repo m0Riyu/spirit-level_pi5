@@ -219,6 +219,18 @@ class TickProcessorTests(unittest.TestCase):
         self.assertEqual(self.ticks.apply(started["id"])[1]["version"], body["version"])  # idempotent
         self.assertTrue(any(message.get("finished") for message in self.published))
 
+    def test_live_roll_is_the_median_of_recent_frames(self):
+        rolls = iter([-.9, -.4, -.5, -.3, -.45, -.5])
+        frames = [SimpleNamespace(positions={}, roll_deg=next(rolls), count=lambda side=None: 0) for _ in range(6)]
+        with unittest.mock.patch("processors.ticks.detect_ticks", side_effect=frames):
+            for index in range(6):
+                self.ticks._next_publish = 0.0
+                self.ticks.process(frame(None, index), None)
+        self.assertEqual(self.published[-1]["roll_frames"], 5)  # window = measurement frames (5 here)
+        self.assertAlmostEqual(self.published[-1]["roll_deg"], -.45)  # median of the last five; -0.9 dropped
+        self.ticks.enter()
+        self.assertEqual(len(self.ticks._recent_rolls), 0)
+
     def test_occluded_ticks_fail_checks_and_cannot_be_applied(self):
         started = self.ticks.request_measure()
         self.run_frames(synthetic_roi(hide=(("left", 2), ("left", 3), ("right", 4))), 5)
