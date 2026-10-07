@@ -86,6 +86,12 @@ def wall_time(epoch_ms=None):
     return iso, epoch_ms
 
 
+def capture_stem(epoch_ms):
+    """Image name from the frame's capture time (Taipei): 20261007_213631_902."""
+    moment = datetime.fromtimestamp(float(epoch_ms) / 1000, LOG_TIMEZONE)
+    return moment.strftime("%Y%m%d_%H%M%S_") + f"{moment.microsecond // 1000:03d}"
+
+
 def valid_request_id(value):
     if not isinstance(value, str):
         return False
@@ -570,11 +576,28 @@ class CaptureManager:
         frame_rows = [row for _, row in job.frames]
         rows = frame_rows + ([job.summary_row] if job.summary_row is not None else [])
         images = []  # (final path, image)
+        taken = set()
+
+        def free_stem(stem, suffixes, sample_id):
+            # Images are named by capture time; two triggers served by the
+            # same frame share it, so the later one gets its sample number.
+            def clash(candidate):
+                return any(candidate + suffix in taken or (self.images_directory / (candidate + suffix)).exists()
+                           for suffix in suffixes)
+            if clash(stem):
+                base, index = f"{stem}_s{int(sample_id):06d}", 2
+                stem = base
+                while clash(stem):
+                    stem, index = f"{base}_{index}", index + 1
+            taken.update(stem + suffix for suffix in suffixes)
+            return stem
+
         for clean_roi, row in job.frames:
             start = time.monotonic()
             annotated = annotate_capture_roi(clean_roi, row)
             row["annotation_ms"] = (time.monotonic() - start) * 1000
-            stem = f"{row['record_id']}_{row['burst_index']:02d}"
+            stem = free_stem(capture_stem(row["capture_completed_at_epoch_ms"]), ("_clean.jpg", "_annotated.jpg"),
+                             row["sample_id"])
             for name, image in (("clean", clean_roi), ("annotated", annotated)):
                 path = self.images_directory / f"{stem}_{name}.jpg"
                 images.append((path, image))
@@ -583,7 +606,9 @@ class CaptureManager:
                 row[f"{name}_image_height"] = image.shape[0]
         raw_path = ""
         if job.raw_frame is not None:
-            path = self.images_directory / f"{frame_rows[0]['record_id']}_raw.png"
+            first = frame_rows[0]
+            stem = free_stem(capture_stem(first["capture_completed_at_epoch_ms"]), ("_raw.png",), first["sample_id"])
+            path = self.images_directory / f"{stem}_raw.png"
             images.append((path, job.raw_frame))
             raw_path = str(path.relative_to(self.session_directory))
         system = self._system_snapshot()

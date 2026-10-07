@@ -410,6 +410,28 @@ class BurstCaptureTests(unittest.TestCase):
         self.assertEqual(estimate["bytes_per_capture"], sum(path.stat().st_size for path in images.iterdir())
                          + self.manager.csv_path.stat().st_size - len(",".join(PI_LOG_FIELDS)) - 2)
 
+    def test_images_are_named_by_capture_time_and_never_overwrite(self):
+        first, second = str(uuid.uuid4()), str(uuid.uuid4())
+        self.manager.submit(first, {"burst_frames": 1})
+        self.manager.submit(second, {"burst_frames": 1})
+        epoch = 1791380191902.4  # 2026-10-07 21:36:31.902 Taipei
+        raw = np.zeros((540, 960, 3), np.uint8)
+        roi, detection, measurement, timings, payload, stability = frame_data()
+        self.manager.freeze_frame(self.manager.begin_frame(), roi, 7, detection, measurement, timings, payload, stability,
+                                  frame_started_epoch_ms=epoch - 20, capture_completed_epoch_ms=epoch,
+                                  prediction_completed_epoch_ms=epoch + 15, frame_completed_monotonic=time.monotonic(),
+                                  raw_frame=raw)
+        self.manager.jobs.join()
+        rows = {row["request_id"]: row for row in self.rows()}
+        self.assertEqual(rows[first]["clean_image_path"], "images/20261007_213631_902_clean.jpg")
+        self.assertEqual(rows[first]["annotated_image_path"], "images/20261007_213631_902_annotated.jpg")
+        self.assertEqual(rows[first]["raw_image_path"], "images/20261007_213631_902_raw.png")
+        sample = rows[second]["sample_id"]
+        self.assertEqual(rows[second]["clean_image_path"], f"images/20261007_213631_902_s{int(sample):06d}_clean.jpg")
+        self.assertEqual(len(list(self.manager.images_directory.iterdir())), 6)
+        self.assertTrue(all((self.manager.session_directory / rows[key][name]).is_file()
+                            for key in rows for name in ("clean_image_path", "annotated_image_path", "raw_image_path")))
+
     def test_bursts_overlap_and_a_late_request_starts_at_its_own_next_frame(self):
         first, second = str(uuid.uuid4()), str(uuid.uuid4())
         self.manager.submit(first, {"burst_frames": 2})

@@ -201,7 +201,9 @@ my_project_V2/calibration/
 | `tick_center_x_px` `tick_center_offset_px` | 最近一次（1 秒內）量到的刻度中心與相對畫面中心的偏移 |
 | `camera_pitch_deg` `camera_yaw_deg` `camera_roll_deg` | AprilTag 量到的相機角度（最近 10 秒平均） |
 
-影像檔名：`<record_id>_<幀序>_clean.jpg`、`_annotated.jpg`、`<record_id>_raw.png`。
+資料夾 `logs/manual_captures/<服務啟動時間>_<隨機碼>/` 是一次服務執行（session）。資料夾內的影像以**該幀的拍攝時間**命名
+（台北時間，精確到毫秒）：`images/20261007_213631_902_clean.jpg`、`_annotated.jpg`，原始畫面 `_raw.png` 用連拍第一幀的時間。
+兩次觸發剛好落在同一幀時，後者加上樣本編號（`_s000002`）避免覆蓋。每張圖對應哪一列以 CSV 的 `*_image_path` 為準。
 WebSocket telemetry 維持既有欄位的意義，新增 `mode`、`calibration`、`measurement.level_offset_div`（扣零點後的格數）、`tick_center`、`camera_pose`。
 
 ## API 一覽
@@ -838,7 +840,7 @@ GET /api/captures/550e8400-e29b-41d4-a716-446655440000
 
 session ID 使用本機日期時間與隨機字串，每次啟動不同；sample ID 從 1 遞增，
 失敗嘗試可能留下號碼缺口；record ID 是 session ID 加六位 sample ID。
-圖片路徑以 session directory 為基準，例如 `images/<record_id>_clean.jpg`。
+圖片路徑以 session directory 為基準，例如 `images/<record_id>_clean.jpg`（V2：改為拍攝時間 `images/20261007_213631_902_clean.jpg`）。
 
 writer 先寫 `<record_id>_clean.tmp.jpg` 與 `_annotated.tmp.jpg`，兩檔均成功並
 flush/fsync 後才用 `os.replace()` 更名、同步 images directory，最後寫 CSV。
