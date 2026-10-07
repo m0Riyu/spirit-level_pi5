@@ -21,13 +21,18 @@
 ## 快速開始
 
 ```bash
-# 服務（以一般使用者 user 執行；預設不開機自動啟動）
+# 服務（以一般使用者 user 執行；已設定開機自動啟動）
 sudo systemctl start levelsvc          # 啟動
 sudo systemctl stop levelsvc           # 停止
 systemctl status levelsvc              # 狀態
 journalctl -u levelsvc -f              # 即時記錄
-sudo systemctl enable levelsvc         # 需要時才設定開機自動啟動
+sudo systemctl disable levelsvc        # 取消開機自動啟動
 ```
+
+舊系統的開機服務 `spirit-level.service`（執行 `/home/user/my_project` 的 V1）已停用並移除，
+備份在 `my_project_V2/deploy_backup/spirit-level.service`。要暫時改用舊版：
+`sudo systemctl stop levelsvc` 後手動執行舊版；要恢復舊版開機啟動，把備份檔放回 `/etc/systemd/system/`
+並 `sudo systemctl disable levelsvc && sudo systemctl enable spirit-level`。
 
 手機與 Pi 連同一網路，開啟 `http://<Pi IP>:8100`（WebSocket `ws://<Pi IP>:8865`）。
 開發中的 V2 使用 8100 / 8865，避免與舊版的 8000 / 8765 衝突。
