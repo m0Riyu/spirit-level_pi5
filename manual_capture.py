@@ -65,7 +65,8 @@ PI_LOG_FIELDS = (
     "burst_valid_count burst_median_slope_mm_per_m burst_std_slope_mm_per_m "
     "burst_median_angle_degrees burst_std_angle_degrees "
     "burst_median_offset_div burst_std_offset_div "
-    "burst_median_center_x_roi burst_std_center_x_roi"
+    "burst_median_center_x_roi burst_std_center_x_roi "
+    "tick_center_x_px tick_center_offset_px"
 ).split()
 CAPTURE_OPTION_FIELDS = ("reference_deg", "a_axis_deg", "sweep_direction", "note", "burst_frames")
 SWEEP_DIRECTIONS = ("forward", "backward", "zero_check")
@@ -421,6 +422,10 @@ class CaptureManager:
                     "system_state": payload["system_state"]})
         calibration = payload.get("calibration") or {}
         row.update({name: calibration.get(name, "") for name in CALIBRATION_ROW_FIELDS})
+        # Latest ① tick check (at most a second old): reveals a camera bumped mid-session.
+        tick_center = payload.get("tick_center") or {}
+        row["tick_center_x_px"] = "" if tick_center.get("x_px") is None else tick_center["x_px"]
+        row["tick_center_offset_px"] = "" if tick_center.get("offset_px") is None else tick_center["offset_px"]
         row.update(timings)
         for name, value in stability.as_dict().items():
             key = "stability_duration_seconds" if name == "stable_duration_seconds" else f"stability_{name}"

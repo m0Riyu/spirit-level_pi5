@@ -121,3 +121,27 @@ def combine_frames(frames):
                           "std_px": float(np.std(values)), "frames_found": int(len(values))})
     rolls = [frame.roll_deg for frame in frames if frame.roll_deg is not None]
     return ticks, (float(np.median(rolls)) if rolls else None)
+
+
+def scale_center(frame):
+    """Median midpoint of the left/right tick pairs found in one frame, or None."""
+    pairs = [(frame.positions[("left", k)] + frame.positions[("right", k)]) / 2
+             for k in range(config.TICK_EXPECTED_PER_SIDE)
+             if ("left", k) in frame.positions and ("right", k) in frame.positions]
+    return float(np.median(pairs)) if len(pairs) >= 3 else None
+
+
+def center_status(center_px, geometry=None):
+    """Tick center vs the ROI center (screw target) and vs the active geometry."""
+    if center_px is None:
+        return {"x_px": None, "offset_px": None, "within": None, "target_px": config.TICK_CENTER_TARGET_PX,
+                "tolerance_px": config.TICK_CENTER_TOLERANCE_PX, "geometry_drift_px": None, "camera_moved": False}
+    offset = center_px - config.TICK_CENTER_TARGET_PX
+    drift = None
+    if geometry is not None:
+        # Same definition as the fit's x_center: median of the pair midpoints.
+        drift = center_px - geometry.x_center_px
+    return {"x_px": center_px, "offset_px": offset, "within": abs(offset) <= config.TICK_CENTER_TOLERANCE_PX,
+            "target_px": config.TICK_CENTER_TARGET_PX, "tolerance_px": config.TICK_CENTER_TOLERANCE_PX,
+            "geometry_drift_px": drift,
+            "camera_moved": drift is not None and abs(drift) > config.TICK_GEOMETRY_DRIFT_WARN_PX}

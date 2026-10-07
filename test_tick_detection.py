@@ -351,3 +351,22 @@ class TickApiTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MeasureTickMonitorTests(unittest.TestCase):
+    def test_tick_center_checked_once_a_second_with_offset_and_camera_moved_hint(self):
+        from tick_detection import center_status
+        geometry = GeometryCalibration("g_geometry", 1, 370.25, (0., 1 / 18.))
+        measure = MeasureProcessor(detector=Mock(), captures=Mock())
+        with unittest.mock.patch("processors.measure.time.monotonic", side_effect=[0., .5, 1.2]):
+            first = measure.check_tick_center(synthetic_roi(center=383.), geometry)
+            same = measure.check_tick_center(synthetic_roi(center=370.), geometry)  # within the second: cached
+            later = measure.check_tick_center(synthetic_roi(center=372.), geometry)
+        self.assertIs(same, first)
+        self.assertAlmostEqual(first["offset_px"], 383. - config.TICK_CENTER_TARGET_PX, delta=.2)
+        self.assertFalse(first["within"])
+        self.assertTrue(first["camera_moved"])
+        self.assertTrue(later["within"])
+        self.assertAlmostEqual(later["geometry_drift_px"], 1.75, delta=.2)
+        self.assertTrue(later["camera_moved"])  # > 1.5 px from the active geometry: redo ③
+        self.assertIsNone(center_status(None)["within"])

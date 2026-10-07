@@ -207,6 +207,17 @@ BROWSER_SCENARIOS = r"""
       mean_slope_mm_per_m: .04, std_slope_mm_per_m: .001, range_slope_mm_per_m: .003, stable_duration_seconds: 2 } });
   assert(document.getElementById("stabilityState").textContent === "穩定" && document.getElementById("state").textContent === "ADJUST", "stability independent of system level state");
   assert(document.getElementById("calibrationBanner").hidden, "no calibration banner without pending geometry");
+  renderTelemetry({ type: "telemetry", frame_id: 46, sent_at_epoch_ms: Date.now(), system_state: "LEVEL", performance: {},
+    stability: {}, measurement: {}, tick_center: { offset_px: 12.34, within: false, tolerance_px: 10 } });
+  assert(!document.getElementById("tickCenterBanner").hidden &&
+    document.getElementById("tickCenterBannerText").textContent.includes("+12.3 px") &&
+    document.getElementById("tickCenterBannerLink").getAttribute("href") === "#/align", "tick center out of range: go to ②");
+  renderTelemetry({ type: "telemetry", frame_id: 47, sent_at_epoch_ms: Date.now(), system_state: "LEVEL", performance: {},
+    stability: {}, measurement: {}, tick_center: { offset_px: 3, within: true, camera_moved: true, geometry_drift_px: 1.8, tolerance_px: 10 } });
+  assert(document.getElementById("tickCenterBannerLink").getAttribute("href") === "#/ticks", "ticks moved vs geometry: go to ③");
+  renderTelemetry({ type: "telemetry", frame_id: 48, sent_at_epoch_ms: Date.now(), system_state: "LEVEL", performance: {},
+    stability: {}, measurement: {}, tick_center: { offset_px: 3, within: true, camera_moved: false } });
+  assert(document.getElementById("tickCenterBanner").hidden, "no tick banner when centered and unchanged");
   // Zero offset 0.427 div: slope +0.001 mm/m is 0.0438 div from the level point,
   // although the bubble is 0.4708 div right of the scale's geometric center.
   renderTelemetry({ type: "telemetry", frame_id: 44, sent_at_epoch_ms: Date.now(), system_state: "LEVEL",
@@ -290,10 +301,15 @@ BROWSER_SCENARIOS = r"""
     angles: { frames: 10, pitch_deg: 10.3, yaw_deg: 19.95, roll_deg: 179.5, pitch_deg_std: .004, yaw_deg_std: .006 },
     delta: { pitch_deg: .3, yaw_deg: -.05, roll_deg: .12 }, model_ready: true, tolerance_deg: .1,
     hold_seconds_required: 3, in_range_seconds: 0, can_complete: false, entered_range: false, teaching: {}, collecting: [],
+    tick_center: { x_px: 382.3, offset_px: 12.3, within: false, target_px: 370, tolerance_px: 10, std_px: .04,
+      guidance: { screw: { screw: "A", label: "順時針 約 1 又 1/4 圈" } } },
     guidance: { within_tolerance: false, screws: [{ screw: "A", ok: false, label: "逆時針 約 1/4 圈" }, { screw: "B", ok: true, label: "✓" }] } };
   location.hash = "#/align";
   await eventually(() => !document.getElementById("viewAlign").hidden);
   renderAlign(alignSample);
+  assert(document.querySelector("#alignTickCenter strong").textContent === "+12.3 px" &&
+    document.getElementById("alignTickCenter").classList.contains("bad") &&
+    document.getElementById("alignTickScrew").textContent === "螺絲 A　順時針 約 1 又 1/4 圈", "tick center target and screw");
   assert(document.querySelector("#alignPitch strong").textContent === "+0.300 °" &&
     document.getElementById("alignPitch").classList.contains("bad") &&
     document.getElementById("alignYaw").classList.contains("ok"), "large deltas colored against the tolerance");
@@ -302,7 +318,9 @@ BROWSER_SCENARIOS = r"""
   assert(document.getElementById("alignRoll").textContent.includes("機構無法調整") && document.getElementById("alignComplete").disabled,
     "roll for reference; complete waits for the hold time");
   renderAlign({ ...alignSample, delta: { pitch_deg: .02, yaw_deg: -.05, roll_deg: .1 }, in_range_seconds: 3.2,
-    can_complete: true, entered_range: true, guidance: { within_tolerance: true, screws: [] } });
+    can_complete: true, entered_range: true, guidance: { within_tolerance: true, screws: [] },
+    tick_center: { ...alignSample.tick_center, offset_px: 2.1, within: true, guidance: { screw: { screw: "A", label: "✓" } } } });
+  assert(document.getElementById("alignTickCenter").classList.contains("ok"), "tick center in range is green");
   assert(!document.getElementById("alignComplete").disabled && document.getElementById("alignHold").textContent.includes("3.2 / 3"),
     "complete enabled after 3 s in range");
   renderAlign({ ...alignSample, delta: null, baseline_version: null, guidance: null });

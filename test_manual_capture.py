@@ -405,6 +405,7 @@ class BurstCaptureTests(unittest.TestCase):
         saved_raw = cv2.imread(str(self.manager.session_directory / rows[0]["raw_image_path"]), cv2.IMREAD_UNCHANGED)
         np.testing.assert_array_equal(saved_raw, raw)  # first burst frame, before undistortion, lossless
         self.assertEqual(rows[0]["raw_frame_id"], "10")
+        self.assertEqual(rows[0]["tick_center_x_px"], "")  # no ① tick check in this payload
         estimate = self.manager.storage_estimate()
         self.assertEqual(estimate["bytes_per_capture"], sum(path.stat().st_size for path in images.iterdir())
                          + self.manager.csv_path.stat().st_size - len(",".join(PI_LOG_FIELDS)) - 2)

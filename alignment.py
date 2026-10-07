@@ -39,6 +39,15 @@ def average_angles(samples):
     return result
 
 
+def average_samples(samples):
+    """average_angles plus the mean tick center (px) of the same frames."""
+    result = average_angles(samples)
+    centers = [sample["tick_center_px"] for sample in samples if sample.get("tick_center_px") is not None]
+    result["tick_center_px"] = float(np.mean(centers)) if centers else None
+    result["tick_center_px_std"] = float(np.std(centers)) if centers else None
+    return result
+
+
 def delta_from_baseline(current, baseline):
     return {axis: (None if current.get(axis) is None or baseline.get(axis) is None
                    else wrap_deg(current[axis] - baseline[axis])) for axis in AXES}
@@ -56,10 +65,34 @@ def screw_model(teach, turn):
     matrix = np.array(columns).T  # rows: pitch, yaw; columns: A, B
     if abs(np.linalg.det(matrix)) < 1e-9:
         raise ValueError("兩顆螺絲的影響方向幾乎相同，無法建立模型；請重新教學")
+    shifts = [None if teach[s]["after"].get("tick_center_px") is None or teach[s]["before"].get("tick_center_px") is None
+              else (teach[s]["after"]["tick_center_px"] - teach[s]["before"]["tick_center_px"]) / turn for s in SCREWS]
     return {"axes": list(ADJUSTABLE), "screws": list(SCREWS), "turn": turn,
             "matrix_deg_per_turn": matrix.tolist(),
             "roll_deg_per_turn": [delta_from_baseline(teach[s]["after"], teach[s]["before"])["roll_deg"] / turn
-                                  for s in SCREWS]}
+                                  for s in SCREWS],
+            "tick_center_px_per_turn": shifts}
+
+
+def tick_center_guidance(offset_px, model, tolerance_px):
+    """Turns that bring the tick center back to the ROI center.
+
+    One target axis (x) and two screws: use the screw that moves the ticks the
+    most per turn; the other screw mainly tilts the perpendicular axis.
+    """
+    result = {"within_tolerance": offset_px is not None and abs(offset_px) <= tolerance_px,
+              "tolerance_px": tolerance_px, "screw": None}
+    shifts = (model or {}).get("tick_center_px_per_turn") or []
+    usable = [(abs(shift), index) for index, shift in enumerate(shifts) if shift is not None and abs(shift) > 1e-6]
+    if offset_px is None or not usable:
+        return result
+    index = max(usable)[1]
+    turns = -offset_px / shifts[index]
+    result["screw"] = {"screw": SCREWS[index], "turns": turns, "px_per_turn": shifts[index],
+                       "ok": result["within_tolerance"],
+                       "label": "✓" if result["within_tolerance"] else
+                       f"{'順時針' if turns > 0 else '逆時針'} {turns_label(turns)}"}
+    return result
 
 
 def turns_label(turns, step=Fraction(1, 8)):

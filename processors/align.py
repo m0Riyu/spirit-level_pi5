@@ -1,4 +1,9 @@
-"""Mode ②: AprilTag pose vs the baseline -> screw guidance -> complete alignment.
+"""Mode ②: re-aim the camera with the screws until the scale's tick center is
+back near the ROI center, then complete alignment (geometry -> pending, redo ③).
+
+The target is the tick center (median of left/right tick pair midpoints) within
+±TICK_CENTER_TOLERANCE_PX of the ROI center. AprilTag pitch/yaw/roll against an
+optional baseline are shown as a second reference.
 
 Tags are measured on the undistorted FULL frame (not the ROI) with the same
 camera matrix as the service. Angles are a moving average of the last
@@ -17,9 +22,10 @@ import cv2
 
 import apriltag_config
 import config
-from alignment import SCREWS, average_angles, delta_from_baseline, guidance, screw_model
+from alignment import SCREWS, average_samples, delta_from_baseline, guidance, screw_model, tick_center_guidance
 from apriltag_measurement import create_detector, measure_frame, summarize
 from calibration_store import TIMEZONE
+from tick_detection import center_status, detect_ticks, scale_center
 
 
 class Collection:
@@ -158,12 +164,14 @@ class AlignProcessor:
             start = self._start_angles
         if not status.get("can_complete"):
             return 409, {"status": "error", "error_code": "NOT_IN_RANGE",
-                         "message": f"需全部在 ±{config.ALIGN_TOLERANCE_DEG:g}° 內持續 {config.ALIGN_HOLD_SECONDS:g} 秒"}
+                         "message": f"刻度中心需在畫面中心 ±{config.TICK_CENTER_TOLERANCE_PX:g} px 內持續 "
+                                    f"{config.ALIGN_HOLD_SECONDS:g} 秒"}
         now = datetime.now(TIMEZONE)
         geometry = self.store.active_state("geometry")
         log = {"schema_version": 1, "completed_at_iso": now.isoformat(timespec="milliseconds"),
                "alignment_version": (self.alignment or {}).get("version"), "baseline": (self.alignment or {}).get("baseline"),
                "before": start, "after": status["angles"], "delta_after": status["delta"],
+               "tick_center_after": status["tick_center"], "tick_center_tolerance_px": config.TICK_CENTER_TOLERANCE_PX,
                "geometry_version": geometry["version"], "tolerance_deg": config.ALIGN_TOLERANCE_DEG}
         self.log_directory.mkdir(parents=True, exist_ok=True)
         path = self.log_directory / f"{now.strftime('%Y%m%dT%H%M%S')}_alignment_log.json"
@@ -186,28 +194,36 @@ class AlignProcessor:
         matrix = self.camera.undistorter.camera_matrix
         measurements = measure_frame(frame.full, self.detector, matrix, apriltag_config.TAG_SIZE_METER)
         summary = summarize(measurements)
+        geometry = self.runtime.measure.geometry if self.runtime is not None else None
+        prior = (geometry.zero_x_roi(), geometry.px_per_div(geometry.zero_x_roi())) if geometry else (None, None)
+        center = scale_center(detect_ticks(frame.roi, *prior))
         finished = []
         with self._lock:
-            if summary["pose_count"]:
+            if summary["pose_count"] or center is not None:
                 sample = {axis: summary[axis] for axis in ("pitch_deg", "yaw_deg", "roll_deg")}
+                sample["tick_center_px"] = center
                 self._samples.append(sample)
                 for job in self._collections:
                     job.samples.append(sample)
                 finished = [job for job in self._collections if len(job.samples) >= job.frames]
                 self._collections = [job for job in self._collections if job not in finished]
-            angles = average_angles(list(self._samples))
+            angles = average_samples(list(self._samples))
             full = len(self._samples) == self._samples.maxlen
             if full and self._start_angles is None:
                 self._start_angles = angles
         for job in finished:
-            job.done(average_angles(job.samples))
+            job.done(average_samples(job.samples))
 
         alignment = self.alignment or {}
         baseline = alignment.get("baseline")
         delta = delta_from_baseline(angles, baseline) if baseline else None
         guide = guidance(delta, alignment.get("screw_model"), config.ALIGN_TOLERANCE_DEG) if delta and full else None
+        tick_center = center_status(angles["tick_center_px"], geometry)
+        tick_center["std_px"] = angles["tick_center_px_std"]
+        tick_center["guidance"] = tick_center_guidance(tick_center["offset_px"], alignment.get("screw_model"),
+                                                       config.TICK_CENTER_TOLERANCE_PX)
         now = time.monotonic()
-        within = bool(guide and guide["within_tolerance"])
+        within = bool(full and tick_center["within"])
         with self._lock:
             entered = within and not self._was_within
             self._was_within = within
@@ -220,6 +236,7 @@ class AlignProcessor:
                 "tag_count": summary["tag_count"], "pose_count": summary["pose_count"],
                 "tag_ids": [result["tag_id"] for result in measurements],
                 "angles": angles, "window_full": full, "delta": delta, "guidance": guide,
+                "tick_center": tick_center,
                 "baseline_version": alignment.get("version") if baseline else None,
                 "model_ready": alignment.get("screw_model") is not None,
                 "tolerance_deg": config.ALIGN_TOLERANCE_DEG, "hold_seconds_required": config.ALIGN_HOLD_SECONDS,

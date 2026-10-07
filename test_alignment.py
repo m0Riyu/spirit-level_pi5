@@ -14,7 +14,8 @@ import numpy as np
 
 import config
 import processors.align as align_module
-from alignment import average_angles, delta_from_baseline, guidance, screw_model, turns_label, wrap_deg
+from alignment import (average_angles, average_samples, delta_from_baseline, guidance, screw_model,
+                       tick_center_guidance, turns_label, wrap_deg)
 from calibration_runtime import CalibrationRuntime
 from calibration_store import CalibrationStore
 from processors.align import AlignProcessor
@@ -57,6 +58,22 @@ class AngleMathTests(unittest.TestCase):
         self.assertEqual(result["screws"][0]["label"], "✓")
         self.assertTrue(guidance({"pitch_deg": .05, "yaw_deg": -.09, "roll_deg": 3.}, model, .1)["within_tolerance"])
 
+    def test_tick_center_guidance_uses_the_screw_that_moves_the_ticks_most(self):
+        base = {**angles(10., 20., 179.), "tick_center_px": 381.}
+        teach = {"A": {"before": base, "after": {**angles(10.3, 20., 179.), "tick_center_px": 378.5}},
+                 "B": {"before": base, "after": {**angles(10., 19.8, 179.), "tick_center_px": 381.5}}}
+        model = screw_model(teach, .25)
+        self.assertEqual(model["tick_center_px_per_turn"], [-10., 2.])
+        result = tick_center_guidance(11., model, 10.)
+        self.assertEqual((result["within_tolerance"], result["screw"]["screw"]), (False, "A"))
+        self.assertAlmostEqual(result["screw"]["turns"], 1.1)
+        self.assertEqual(result["screw"]["label"], "順時針 約 1 又 1/8 圈")
+        self.assertEqual(tick_center_guidance(-4., model, 10.)["screw"]["label"], "✓")
+        self.assertIsNone(tick_center_guidance(11., None, 10.)["screw"])
+        mean = average_samples([{**angles(0, 0, 0), "tick_center_px": 380.}, {**angles(0, 0, 0), "tick_center_px": 381.},
+                                {"pitch_deg": None, "yaw_deg": None, "roll_deg": None, "tick_center_px": 382.}])
+        self.assertEqual((mean["tick_center_px"], mean["frames"]), (381., 3))
+
     def test_parallel_screws_are_rejected(self):
         base = angles(0, 0, 0)
         teach = {"A": {"before": base, "after": angles(.3, .1, 0)}, "B": {"before": base, "after": angles(.6, .2, 0)}}
@@ -93,11 +110,14 @@ class ProcessorTests(unittest.TestCase):
         self.align = AlignProcessor(store=self.store, runtime=self.runtime, camera=camera, publish=self.published.append,
                                     detector_factory=Mock, log_directory=Path(self.directory.name) / "alignment_logs")
         self.pose = angles(10., 20., 179.5)
+        self.center = 381.  # tick center: +11 px from the ROI center (370)
         self.clock = FakeClock()
-        for target, name in ((align_module, "measure_frame"), (align_module, "summarize"), (align_module.time, "monotonic")):
+        for target, name in ((align_module, "measure_frame"), (align_module, "summarize"), (align_module.time, "monotonic"),
+                             (align_module, "detect_ticks"), (align_module, "scale_center")):
             replacement = {"measure_frame": lambda *args: [{"tag_id": 7, "pose_valid": True}],
                            "summarize": lambda measurements: {"tag_count": 4, "pose_count": 4, **self.pose},
-                           "monotonic": self.clock}[name]
+                           "monotonic": self.clock, "detect_ticks": lambda *args: None,
+                           "scale_center": lambda frame: self.center}[name]
             patcher = patch.object(target, name, side_effect=replacement)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -106,7 +126,8 @@ class ProcessorTests(unittest.TestCase):
     def frames(self, count=config.ALIGN_AVERAGE_FRAMES, seconds=.04):
         for index in range(count):
             self.clock.now += seconds
-            self.align.process(SimpleNamespace(frame_id=index, full=np.zeros((540, 960, 3), np.uint8), capture_ms=1.), None)
+            self.align.process(SimpleNamespace(frame_id=index, full=np.zeros((540, 960, 3), np.uint8),
+                                               roi=np.zeros((160, 740, 3), np.uint8), capture_ms=1.), None)
         return self.align.status()
 
     def test_noise_and_absolute_angles_without_baseline(self):
@@ -117,41 +138,53 @@ class ProcessorTests(unittest.TestCase):
         self.assertIsNone(status["delta"])
         self.assertFalse(status["can_complete"])
 
-    def test_baseline_teaching_guidance_hold_and_complete(self):
-        self.frames()
+    def test_baseline_teaching_tick_center_target_hold_and_complete(self):
+        status = self.frames()
+        self.assertAlmostEqual(status["tick_center"]["offset_px"], 11., places=9)
+        self.assertFalse(status["tick_center"]["within"])
+        self.assertIsNone(status["tick_center"]["guidance"]["screw"])  # no screw model yet
         self.assertEqual(self.align.set_baseline()[1]["error_code"], "CONFIRMATION_REQUIRED")
         self.assertEqual(self.align.set_baseline(confirm=True)[0], 202)
         self.frames()
         baseline_version = self.store.active_state("alignment")["version"]
         self.assertIsNotNone(baseline_version)
-        self.assertAlmostEqual(self.store.load("alignment")[0]["baseline"]["pitch_deg"], 10., places=9)
+        baseline = self.store.load("alignment")[0]["baseline"]
+        self.assertAlmostEqual(baseline["pitch_deg"], 10., places=9)
+        self.assertAlmostEqual(baseline["tick_center_px"], 381., places=9)
         self.assertEqual(self.measure.calibration["alignment_version"], baseline_version)
 
-        # Teach: A turns pitch +0.30 deg per 1/4 turn, B turns yaw -0.20 deg.
+        # Teach: A (1/4 turn) pitch +0.30 deg, ticks -2.5 px; B yaw -0.20 deg, ticks +0.5 px.
         self.assertEqual(self.align.teach("A", "finish")[1]["error_code"], "NOT_STARTED")
         self.align.teach("A", "start")
         self.frames()
-        self.pose = angles(10.3, 20., 179.5)
+        self.pose, self.center = angles(10.3, 20., 179.5), 378.5
         self.align.teach("A", "finish")
         self.frames()
         self.align.teach("B", "start")
         self.frames()
-        self.pose = angles(10.3, 19.8, 179.5)
+        self.pose, self.center = angles(10.3, 19.8, 179.5), 379.
         self.align.teach("B", "finish")
         self.frames()
         model = self.store.load("alignment")[0]["screw_model"]
         np.testing.assert_allclose(model["matrix_deg_per_turn"], [[1.2, 0.], [0., -.8]], atol=1e-9)
+        np.testing.assert_allclose(model["tick_center_px_per_turn"], [-10., 2.], atol=1e-9)
         self.assertAlmostEqual(self.store.load("alignment")[0]["baseline"]["yaw_deg"], 20., places=9)  # baseline kept
 
         status = self.frames()
-        # Both screws were turned clockwise while teaching: undo both counter-clockwise.
+        # AprilTag reference guidance: both screws were turned clockwise, undo both.
         self.assertEqual([item["label"] for item in status["guidance"]["screws"]], ["逆時針 約 1/4 圈", "逆時針 約 1/4 圈"])
+        # Screw target: ticks +9 px from the ROI center, inside ±10 px already.
+        self.assertTrue(status["tick_center"]["within"])
+        self.center = 385.  # +15 px: A clockwise 1.5 turn would bring it to 370
+        status = self.frames()
+        self.assertEqual(status["tick_center"]["guidance"]["screw"]["screw"], "A")
+        self.assertEqual(status["tick_center"]["guidance"]["screw"]["label"], "順時針 約 1 又 1/2 圈")
         self.assertEqual(self.align.complete()[1]["error_code"], "NOT_IN_RANGE")
 
-        self.pose = angles(10.05, 20.02, 179.7)  # within ±0.10 on pitch/yaw; roll is ignored
+        self.center = 372.  # back within ±10 px
         self.published.clear()
         status = self.frames(count=config.ALIGN_AVERAGE_FRAMES)
-        self.assertTrue(status["guidance"]["within_tolerance"])
+        self.assertTrue(status["tick_center"]["within"])
         self.assertTrue(any(message["entered_range"] for message in self.published))
         self.assertFalse(status["can_complete"])
         status = self.frames(count=80)  # 3.2 s more in range
@@ -160,7 +193,7 @@ class ProcessorTests(unittest.TestCase):
         self.assertEqual(code, 200)
         log = json.loads(Path(result["log"]).read_text())
         self.assertAlmostEqual(log["before"]["pitch_deg"], 10., places=9)
-        self.assertAlmostEqual(log["after"]["pitch_deg"], 10.05, places=9)
+        self.assertAlmostEqual(log["tick_center_after"]["x_px"], 372., places=9)
         self.assertTrue(self.store.active_state("geometry")["pending_confirmation"])
         self.assertEqual(result["calibration"]["status"], "pending")
         self.assertEqual(result["next"], "#/ticks")

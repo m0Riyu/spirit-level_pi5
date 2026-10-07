@@ -8,6 +8,7 @@ from calibration_store import NOMINAL_VIAL
 from display import show_clean_frame as show_frame
 from stability import StabilityTracker
 from telemetry_server import build_telemetry_payload
+from tick_detection import center_status, detect_ticks, scale_center
 
 
 def print_metrics(frame_id, detection, measurement, timings):
@@ -56,6 +57,8 @@ class MeasureProcessor:
         self.publish = publish
         self.logger = logger
         self.stability = new_stability_tracker()
+        self.tick_center = center_status(None)
+        self._next_tick_check = 0.0
         self.set_calibration(geometry, vial, calibration)
 
     def set_calibration(self, geometry, vial, calibration):
@@ -78,6 +81,7 @@ class MeasureProcessor:
     def enter(self):
         # A window from before the switch would describe an older scene.
         self.stability = new_stability_tracker()
+        self._next_tick_check = 0.0
         self.captures.set_ready(True)
 
     def leave(self):
@@ -97,6 +101,16 @@ class MeasureProcessor:
         if not detection.detected:
             return geometry.measure(None)
         return geometry.measure(detection.center_x_roi, detection.x1_roi, detection.x2_roi)
+
+    def check_tick_center(self, roi, geometry):
+        """Once a second: where the scale ticks are (screw trigger, camera-moved hint)."""
+        now = time.monotonic()
+        if now < self._next_tick_check:
+            return self.tick_center
+        self._next_tick_check = now + config.TICK_MONITOR_INTERVAL_SECONDS
+        prior = (geometry.zero_x_roi(), geometry.px_per_div(geometry.zero_x_roi())) if geometry else (None, None)
+        self.tick_center = center_status(scale_center(detect_ticks(roi, *prior)), geometry)
+        return self.tick_center
 
     def process(self, frame, context):
         frame_id, loop_start = frame.frame_id, context["loop_start"]
@@ -138,6 +152,7 @@ class MeasureProcessor:
             self.logger.write(frame_id, prediction.detection, measurement, timings)
         print_metrics(frame_id, prediction.detection, measurement, timings)
         payload["mode"] = "measure"
+        payload["tick_center"] = self.check_tick_center(frame.roi, geometry)
         payload["stability"] = stability.as_dict()
         payload["capture"] = {"ready": self.captures.ready, "require_stable_for_capture": self.captures.require_stable}
         payload["frame_started_at_epoch_ms"] = frame.started_epoch_ms

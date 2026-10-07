@@ -387,6 +387,10 @@
     .align-axis small { color: var(--muted); font-size: 12px; }
     .align-axis.ok strong, .screw-list .ok { color: var(--mint); }
     .align-axis.bad strong, .screw-list .bad { color: var(--red); }
+    .align-axis.tick-center strong { font-size: clamp(40px, 13vw, 64px); }
+    .screw-list.small { font-size: 16px; font-weight: 700; }
+    .tick-banner { border-color: var(--orange); background: rgba(255, 154, 95, 0.14); color: #ffd3b8; }
+    .tick-banner a { color: inherit; font-weight: 800; }
     .align-roll { color: var(--muted); font-size: 15px; margin: 4px 0 8px; }
     .screw-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: clamp(20px, 6vw, 28px); font-weight: 800; }
     .page button.danger { border-color: var(--red); background: #3d1714; }
@@ -476,13 +480,9 @@
     <section id="viewAlign" class="view" data-mode="align" hidden>
       <div class="card page">
         <h2>② 相機對位</h2>
-        <p id="alignStatus" class="capture-note">等待資料…</p>
-        <div class="align-grid">
-          <div id="alignPitch" class="align-axis"><span>Pitch</span><strong>—</strong><small>雜訊 —</small></div>
-          <div id="alignYaw" class="align-axis"><span>Yaw</span><strong>—</strong><small>雜訊 —</small></div>
-        </div>
-        <div id="alignRoll" class="align-roll">Roll —（機構無法調整，僅供參考）</div>
-        <ul id="alignScrews" class="screw-list"></ul>
+        <p>刻度中心超出畫面中心容許範圍時，用螺絲調回範圍內，再按「完成對位」並重做 ③。</p>
+        <div id="alignTickCenter" class="align-axis tick-center"><span>刻度中心偏移</span><strong>—</strong><small>—</small></div>
+        <ul id="alignTickScrew" class="screw-list"></ul>
         <p id="alignHold" class="capture-note"></p>
         <div class="page-actions">
           <button id="alignComplete" type="button" disabled>完成對位</button>
@@ -492,8 +492,19 @@
         <img id="alignPreview" class="preview" alt="AprilTag 預覽" hidden>
       </div>
       <div class="card page">
+        <h2>AprilTag 角度（參考）</h2>
+        <p id="alignStatus" class="capture-note">等待資料…</p>
+        <div class="align-grid">
+          <div id="alignPitch" class="align-axis"><span>Pitch</span><strong>—</strong><small>雜訊 —</small></div>
+          <div id="alignYaw" class="align-axis"><span>Yaw</span><strong>—</strong><small>雜訊 —</small></div>
+        </div>
+        <div id="alignRoll" class="align-roll">Roll —（機構無法調整，僅供參考）</div>
+        <ul id="alignScrews" class="screw-list small"></ul>
+      </div>
+      <div class="card page">
         <h2>螺絲教學</h2>
-        <p>每顆螺絲：按「開始」→ 順時針轉 1/4 圈 → 按「完成」。A、B 都完成後會自動建立模型。</p>
+        <p>每顆螺絲：按「開始」→ 順時針轉 1/4 圈 → 按「完成」。A、B 都完成後會自動建立模型
+          （同時記錄每圈讓刻度移動幾 px 與 AprilTag 角度變化）。</p>
         <div class="page-actions">
           <button type="button" data-teach="A/start">A 開始</button><button type="button" data-teach="A/finish">A 完成</button>
           <button type="button" data-teach="B/start">B 開始</button><button type="button" data-teach="B/finish">B 完成</button>
@@ -563,6 +574,9 @@
     </div>
 
     <div id="viewMeasure" class="view" data-mode="measure" hidden>
+    <div id="tickCenterBanner" class="calibration-banner tick-banner" role="status" hidden>
+      <span id="tickCenterBannerText"></span> <a id="tickCenterBannerLink" href="#/align">前往 ②</a>
+    </div>
 
     <div id="calibrationBanner" class="calibration-banner" role="status" hidden>
       幾何校正待確認：相機可能動過，請重做刻度檢查。仍可量測。
@@ -855,6 +869,20 @@
       phoneCapture.updateButton();
       const calibration = data.calibration || {};
       $("calibrationBanner").hidden = calibration.geometry_pending_confirmation !== true;
+      const tick = data.tick_center || {};
+      const tickOut = tick.within === false, tickMoved = tick.within === true && tick.camera_moved === true;
+      $("tickCenterBanner").hidden = !(tickOut || tickMoved);
+      if (tickOut) {
+        $("tickCenterBannerText").textContent = `刻度中心偏離畫面中心 ${number(tick.offset_px, 1, "px", true)}` +
+          `（容許 ±${tick.tolerance_px} px）：請到 ② 用螺絲調整，完成後重做 ③。`;
+        $("tickCenterBannerLink").href = "#/align";
+        $("tickCenterBannerLink").textContent = "前往 ②";
+      } else if (tickMoved) {
+        $("tickCenterBannerText").textContent = `刻度位置與目前幾何校正相差 ${number(tick.geometry_drift_px, 1, "px", true)}，` +
+          "相機可能動過，建議重做 ③ 刻度檢查。";
+        $("tickCenterBannerLink").href = "#/ticks";
+        $("tickCenterBannerLink").textContent = "前往 ③";
+      }
       $("calibrationVersions").textContent = calibration.geometry_version
         ? `幾何校正 ${calibration.geometry_version} · 水平儀校正 ${calibration.vial_version}` : "校正檔未載入";
 
@@ -1117,9 +1145,21 @@
         return row;
       }) : [Object.assign(document.createElement("li"), {
         textContent: !hasBaseline ? "設定基準後才有螺絲引導" : (data.model_ready ? "收集中…" : "尚未教學螺絲模型") })]));
-      $("alignHold").textContent = hasBaseline ? (data.guidance?.within_tolerance
-        ? `範圍內（±${data.tolerance_deg}°）${data.in_range_seconds.toFixed(1)} / ${data.hold_seconds_required} 秒`
-        : `目標：Pitch、Yaw 都在 ±${data.tolerance_deg}° 內持續 ${data.hold_seconds_required} 秒`) : "";
+      const tick = data.tick_center || {};
+      const tickBox = $("alignTickCenter");
+      tickBox.querySelector("strong").textContent = tick.offset_px == null ? "未偵測到刻度" : number(tick.offset_px, 1, "px", true);
+      tickBox.querySelector("small").textContent = tick.offset_px == null ? "請確認畫面與照明" :
+        `目標：畫面中心 ${tick.target_px} px ±${tick.tolerance_px} px · 目前 ${number(tick.x_px, 1, "px")} · 雜訊 ${number(tick.std_px, 2, "px")}`;
+      tickBox.classList.toggle("ok", tick.within === true);
+      tickBox.classList.toggle("bad", tick.within === false);
+      const tickScrew = tick.guidance?.screw;
+      $("alignTickScrew").replaceChildren(Object.assign(document.createElement("li"), {
+        className: tick.within ? "ok" : "bad",
+        textContent: tickScrew ? `螺絲 ${tickScrew.screw}　${tickScrew.label}` :
+          (tick.within ? "✓ 在範圍內" : (data.model_ready ? "收集中…" : "尚未教學螺絲：先做下方「螺絲教學」，或觀察偏移數值自行調整")) }));
+      $("alignHold").textContent = tick.within
+        ? `範圍內 ${data.in_range_seconds.toFixed(1)} / ${data.hold_seconds_required} 秒`
+        : `目標：刻度中心在 ±${tick.tolerance_px ?? "—"} px 內持續 ${data.hold_seconds_required} 秒`;
       $("alignComplete").disabled = !data.can_complete;
       if (data.entered_range) alertInRange();
       const teaching = Object.entries(data.teaching || {}).map(([screw, steps]) => `${screw}：${steps.join("、") || "收集中"}`);
