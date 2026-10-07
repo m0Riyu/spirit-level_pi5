@@ -81,6 +81,11 @@ class AlignProcessor:
     def before_capture(self):
         return None
 
+    def reload_alignment(self):
+        """Pick up another active alignment version (rollback or correction)."""
+        self.alignment = self._load_alignment()
+        return self.alignment
+
     def _load_alignment(self):
         if self.store is None or self.store.active_state("alignment")["version"] is None:
             return None

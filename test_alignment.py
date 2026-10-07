@@ -181,6 +181,13 @@ class ProcessorTests(unittest.TestCase):
         self.assertEqual(result["calibration"]["status"], "pending")
         self.assertEqual(result["next"], "#/ticks")
 
+    def test_activating_another_alignment_version_reaches_the_processor(self):
+        model = {"matrix_deg_per_turn": [[1.2, 0.], [0., -.8]], "screws": ["A", "B"]}
+        self.store.save("alignment", {"version": "20261007T010000_alignment", "screw_model": model}, activate=False)
+        self.assertIsNone(self.align.alignment)
+        self.store.activate("alignment", "20261007T010000_alignment")
+        self.assertEqual(self.align.reload_alignment()["screw_model"], model)
+
     def test_publish_rate_is_capped(self):
         self.frames(count=50, seconds=.01)  # 0.5 s of frames at 100 fps
         self.assertLessEqual(len(self.published), 6)

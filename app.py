@@ -53,7 +53,10 @@ def api_routes(manager, ticks, runtime, align=None, controller=None, state=None)
 
     def activate(params, body):
         try:
-            return 200, runtime.activate(params["kind"], params["version"])
+            status = runtime.activate(params["kind"], params["version"])
+            if params["kind"] == "alignment" and align is not None:
+                align.reload_alignment()
+            return 200, status
         except FileNotFoundError as error:
             return 404, {"status": "error", "error_code": "NOT_FOUND", "message": str(error)}
 
