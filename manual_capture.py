@@ -66,7 +66,8 @@ PI_LOG_FIELDS = (
     "burst_median_angle_degrees burst_std_angle_degrees "
     "burst_median_offset_div burst_std_offset_div "
     "burst_median_center_x_roi burst_std_center_x_roi "
-    "tick_center_x_px tick_center_offset_px"
+    "tick_center_x_px tick_center_offset_px "
+    "camera_pitch_deg camera_yaw_deg camera_roll_deg"
 ).split()
 CAPTURE_OPTION_FIELDS = ("reference_deg", "a_axis_deg", "sweep_direction", "note", "burst_frames")
 SWEEP_DIRECTIONS = ("forward", "backward", "zero_check")
@@ -426,6 +427,9 @@ class CaptureManager:
         tick_center = payload.get("tick_center") or {}
         row["tick_center_x_px"] = "" if tick_center.get("x_px") is None else tick_center["x_px"]
         row["tick_center_offset_px"] = "" if tick_center.get("offset_px") is None else tick_center["offset_px"]
+        pose = payload.get("camera_pose") or {}  # ① AprilTag average (last ~10 s)
+        for axis in ("pitch", "yaw", "roll"):
+            row[f"camera_{axis}_deg"] = "" if pose.get(f"{axis}_deg") is None else pose[f"{axis}_deg"]
         row.update(timings)
         for name, value in stability.as_dict().items():
             key = "stability_duration_seconds" if name == "stable_duration_seconds" else f"stability_{name}"

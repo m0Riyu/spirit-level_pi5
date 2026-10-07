@@ -71,19 +71,22 @@ GEOMETRY_POLYNOMIAL_DEGREE = 2        # 1-3
 TICK_MAX_RESIDUAL_RMS_PX = 0.5
 TICK_MAX_PITCH_CHANGE = 0.03          # vs the active version; above needs confirmation
 # ② camera alignment (AprilTags on the undistorted full frame).
-ALIGN_AVERAGE_FRAMES = 10             # moving average; also frames per teach/baseline reading
-ALIGN_TOLERANCE_DEG = 0.10            # pitch and yaw vs the baseline
+ALIGN_AVERAGE_FRAMES = 10             # moving average; also frames per teaching reading
+ALIGN_TARGET_DEG = {"pitch_deg": 0.0, "yaw_deg": 0.0}  # camera square to the AprilTag plane
+ALIGN_TOLERANCE_DEG = 0.10            # pitch and yaw vs the target
 ALIGN_HOLD_SECONDS = 3.0              # in range this long before "完成對位"
 ALIGN_TEACH_TURN = 0.25               # clockwise turn used while teaching each screw
 ALIGN_PUBLISH_INTERVAL_SECONDS = 0.1  # 10 Hz so the page reacts within 0.5 s
 
-# Screw adjustment trigger: the tick center (median of left/right pair
-# midpoints) may sit anywhere ③ measured it, but beyond this distance from the
-# ROI center the camera is re-aimed with the screws (②), then ③ is redone.
+# Tick center (median of left/right pair midpoints) vs the ROI center. With
+# pitch/yaw zeroed by ②, this is decided by where the vial sits; beyond the
+# tolerance ① asks to check the vial placement (③ handles any position).
 TICK_CENTER_TARGET_PX = ROI_WIDTH / 2
 TICK_CENTER_TOLERANCE_PX = 10.0
 TICK_MONITOR_INTERVAL_SECONDS = 1.0   # ① checks the tick center this often
 TICK_GEOMETRY_DRIFT_WARN_PX = 1.5     # ① hint: ticks moved vs the active geometry -> redo ③
+POSE_MONITOR_INTERVAL_SECONDS = 1.0   # ① measures the AprilTag pose this often (~22 ms)
+POSE_MONITOR_WINDOW = 10              # ① averages this many pose readings (10 s) before warning
 
 PREVIEW_MAX_FPS = 5
 PREVIEW_JPEG_QUALITY = 60

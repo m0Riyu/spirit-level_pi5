@@ -12,8 +12,9 @@
 **固定流程：② 相機對位 → ③ 刻度檢查 → ① 量測。** 相機只要動過就要重做 ③；
 ③ 重新確認前，① 會顯示黃色「幾何校正待確認」橫幅（仍可量測）。
 
-刻度中心不需要精準對準畫面中心：③ 會量出刻度實際位置，換算以它為準。只有**刻度中心偏離畫面中心超過
-±10 px**（`TICK_CENTER_TOLERANCE_PX`）時，① 會顯示橙色橫幅，才到 ② 用螺絲把刻度調回範圍內。
+**相機姿態的目標：Pitch、Yaw 歸零**（相機正對 AprilTag 玻璃面，容許 ±0.10°）。① 每秒量一次 AprilTag，
+10 秒平均超出範圍時顯示橙色橫幅，到 ② 用螺絲歸零。刻度中心不需要精準對準畫面中心：③ 會量出刻度實際位置，換算以它為準；
+Yaw 歸零後刻度落在哪裡由水平儀擺放決定，刻度中心偏離畫面中心超過 ±10 px 時只提示「確認水平儀擺放位置」。
 
 設計與決策的完整說明見 [ARCHITECTURE_SPEC.md](../ARCHITECTURE_SPEC.md)（V2 根目錄）。
 本文件後半段「V1 參考文件」保留舊版的細節說明（YOLO、調參工具、手動拍攝 LOG 欄位），其中與 V2 不同之處已標註。
@@ -77,19 +78,19 @@ echo 'LEVELSVC_PIN=<自訂數字>' | sudo tee /etc/levelsvc/env >/dev/null && su
 
 ### ② 相機對位
 
-什麼時候需要：① 出現橙色橫幅「刻度中心偏離畫面中心 … 請到 ② 用螺絲調整」時。
+什麼時候需要：① 出現橙色橫幅「相機角度偏離 … 請到 ② 用螺絲歸零」時，或相機被碰過時。
 
-1. 最上方大字顯示**刻度中心偏移**（左右刻度對中點的中位數 − 畫面中心 370 px，10 幀平均）；綠色在 ±10 px 內、紅色在範圍外。
+1. 大字顯示 **Pitch、Yaw**（10 幀移動平均，目標 0）與讀值雜訊；綠色在 ±0.10° 內、紅色在範圍外。
+   Roll 顯示但機構無法調整，僅供參考。
 2. **螺絲教學**（第一次或更換相機座後）：螺絲 A 按「開始」→ 順時針轉 1/4 圈 → 按「完成」；B 相同。
-   系統記錄每顆螺絲每圈讓刻度移動幾 px，以及 AprilTag 角度的變化（2×2 靈敏度矩陣）。
-3. **引導**：選每圈移動刻度最多的那顆螺絲，換算方向與圈數（取最接近的 1/8 圈），例如「螺絲 A　順時針 約 1/2 圈」；在範圍內顯示 ✓。
-   未教學時也可以直接看偏移數值自行調整。
-4. 刻度中心在範圍內持續 3 秒，「完成對位」才能按；進入範圍時手機震動（iOS 不支援，只有提示音）。
-5. 「完成對位」寫入 `logs/alignment/<時間>_alignment_log.json`（調整前後的角度與刻度中心），並把幾何校正設為「待確認」，提示前往 ③。
-6. 下方「AprilTag 角度（參考）」：Pitch、Yaw、Roll（10 幀平均與雜訊）。設定基準後顯示與基準的差值與另一組螺絲引導，
-   可作為不看刻度時的參考。「設為新基準」需 PIN＋二次確認。Roll 機構無法調整，僅供參考。
+   系統記錄每顆螺絲每圈造成的 Pitch、Yaw 變化（2×2 靈敏度矩陣），之後才知道哪顆螺絲控制哪個角度。
+3. **引導**：依矩陣換算每顆螺絲該轉的方向與圈數（取最接近的 1/8 圈），例如「螺絲 A　逆時針 約 1/2 圈」；在範圍內顯示 ✓。
+4. Pitch、Yaw 都在範圍內並持續 3 秒，「完成對位」才能按；進入範圍時手機震動（iOS 不支援，只有提示音）。
+5. 「完成對位」寫入 `logs/alignment/<時間>_alignment_log.json`（調整前後角度、刻度中心），並把幾何校正設為「待確認」，提示前往 ③。
+6. 頁面下方顯示刻度中心相對畫面中心的位置；超出 ±10 px 時提示確認水平儀擺放（再轉螺絲會破壞歸零）。
 
 靜止時的實測雜訊（960×540、4 個 tag）：單幀 Pitch 0.014° / Yaw 0.012°；10 幀平均的波動約 0.02°（主要為 1–3 秒尺度的低頻抖動）。
+目標角度在 `config.ALIGN_TARGET_DEG`，容許範圍 `ALIGN_TOLERANCE_DEG`。
 
 ### ③ 刻度檢查
 
@@ -115,10 +116,11 @@ echo 'LEVELSVC_PIN=<自訂數字>' | sudo tee /etc/levelsvc/env >/dev/null && su
 - 展開「參考值與連拍」可輸入 DL-S4W 讀值、A 軸設定值、掃描方向（正向／反向／零點檢查）、備註與連拍幀數。
   **參考值會保留到下次修改**，每個量測點記錄前請更新；保存成功的訊息會顯示這次送出的參考值。
 - 離開 ① 模式時，尚未完成的連拍會以 `MODE_CHANGED` 結束（不會留下不完整的紀錄）。
-- 每秒量一次畫面中的刻度中心（約 6 ms，不影響 FPS）：
-  - 偏離畫面中心超過 ±10 px → 橙色橫幅，請到 ② 用螺絲調整。
-  - 在範圍內，但與目前幾何校正相差超過 1.5 px → 提示「相機可能動過，建議重做 ③」（不會自動改成待確認）。
-  - 拍攝時寫入 CSV（`tick_center_x_px`、`tick_center_offset_px`），事後可檢查拍攝中途相機有沒有被碰動。
+- 每秒檢查一次相機與刻度（AprilTag 約 22 ms、刻度約 6 ms），依序顯示橙色橫幅：
+  1. AprilTag Pitch 或 Yaw（最近 10 秒平均）偏離 0 超過 ±0.10° → 「相機角度偏離，請到 ② 用螺絲歸零」。
+  2. 角度正常但刻度中心偏離畫面中心超過 ±10 px → 「請確認水平儀的擺放位置」。
+  3. 都正常，但刻度位置與目前幾何校正相差超過 1.5 px → 「相機可能動過，建議重做 ③」（不會自動改成待確認）。
+- 拍攝時寫入 CSV（`tick_center_*`、`camera_pitch/yaw/roll_deg`），事後可檢查拍攝中途相機有沒有被碰動。
 
 ### ⚙ 系統
 
@@ -164,7 +166,7 @@ my_project_V2/calibration/
 只有一次機台機會時，目標是把事後修正需要的資料一次收齊，並在離開前確認資料完整。
 
 1. 暖機 30 分鐘；確認對焦（啟動記錄顯示 3711/3711）與畫面（⚙ 或 ② ③ 預覽）。
-2. ① 沒有橙色橫幅（刻度中心在畫面中心 ±10 px 內；超出時先到 ② 用螺絲調整）→ ③ 刻度檢查並套用（狀態列「校正」顯示「正常」）。
+2. ① 沒有橙色橫幅（Pitch、Yaw 在 0 ±0.10° 內；超出時先到 ② 用螺絲歸零）→ ③ 刻度檢查並套用（狀態列「校正」顯示「正常」）。
 3. 零點：A 軸 0 位置，掃描方向選「零點檢查」，記錄；可以的話把水平儀轉 180° 再記錄一次（反轉法）。
 4. 正向掃描：約 −0.0065° → +0.0065°，每 0.0005° 一點；每點等氣泡穩定（約 30 秒，「氣泡穩定度」顯示穩定）後，
    **先填 A 軸設定值與 DL-S4W 讀值**，掃描方向選「正向」，再按「記錄並拍照」（連拍 15 幀）。
@@ -197,9 +199,10 @@ my_project_V2/calibration/
 | `geometry_version` `geometry_pending_confirmation` `vial_version` `alignment_version` `mm_per_m_per_div` `zero_offset_div` | 當下使用的校正 |
 | `burst_valid_count` `burst_median_*` `burst_std_*` | 彙總列：坡度、角度、格數、氣泡中心的中位數與標準差 |
 | `tick_center_x_px` `tick_center_offset_px` | 最近一次（1 秒內）量到的刻度中心與相對畫面中心的偏移 |
+| `camera_pitch_deg` `camera_yaw_deg` `camera_roll_deg` | AprilTag 量到的相機角度（最近 10 秒平均） |
 
 影像檔名：`<record_id>_<幀序>_clean.jpg`、`_annotated.jpg`、`<record_id>_raw.png`。
-WebSocket telemetry 維持既有欄位的意義，新增 `mode`、`calibration`、`measurement.level_offset_div`（扣零點後的格數）、`tick_center`。
+WebSocket telemetry 維持既有欄位的意義，新增 `mode`、`calibration`、`measurement.level_offset_div`（扣零點後的格數）、`tick_center`、`camera_pose`。
 
 ## API 一覽
 
@@ -212,7 +215,6 @@ WebSocket telemetry 維持既有欄位的意義，新增 `mode`、`calibration`�
 | GET | `/api/captures/ready`、`/api/captures/{id}` | 拍攝狀態（`ready` 另含 `storage`、`burst_frames_default`） |
 | GET | `/api/align` | ② 目前狀態 |
 | POST | `/api/align/teach/{A\|B}/{start\|finish}`、`/api/align/complete` | 螺絲教學、完成對位 |
-| POST | `/api/align/baseline` | 設為新基準（PIN，`{"confirm": true}`） |
 | POST | `/api/ticks/measure` → GET `/api/ticks/{id}` → POST `/api/ticks/{id}/apply` | ③ 量測、結果、套用（`{"confirm": true}` 用於差異 > 3%） |
 | GET | `/api/calibration/{geometry\|vial\|alignment}` | 歷史版本 |
 | POST | `/api/calibration/{kind}/{version}/activate` | 退回指定版本（PIN） |

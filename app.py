@@ -70,7 +70,6 @@ def api_routes(manager, ticks, runtime, align=None, controller=None, state=None)
         ("POST", r"/api/align/teach/(?P<screw>[AB])/(?P<step>start|finish)",
          in_align(lambda params, body: align.teach(params["screw"], params["step"]))),
         ("POST", r"/api/align/complete", in_align(lambda params, body: align.complete())),
-        ("POST", r"/api/align/baseline", in_align(lambda params, body: align.set_baseline(body.get("confirm") is True)), True),
     ]
     session = r"(?P<session>\d{8}_\d{6}_[0-9a-f]{8})"
     system_routes = [] if controller is None else [
@@ -114,7 +113,7 @@ def run():
         if telemetry is not None:
             telemetry.publish(payload)
 
-    measure = MeasureProcessor(detector=detector, captures=captures, publish=publish, logger=logger)
+    measure = MeasureProcessor(detector=detector, captures=captures, publish=publish, logger=logger, camera=camera)
     runtime = CalibrationRuntime(store, measure, lambda: camera.undistorter if camera.camera is not None else None)
     preview = PreviewBuffer()
     ticks = TickProcessor(runtime=runtime, camera=camera, publish=publish, preview=preview)

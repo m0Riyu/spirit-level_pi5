@@ -3,8 +3,8 @@
 The camera mount has a fixed pivot and two spring screws at the corners of a
 right triangle; each screw tilts one axis. Tilts show up as the AprilTag's
 pitch and yaw. Roll (about the lens axis) cannot be adjusted mechanically and
-is shown for reference only. The target is the recorded baseline pose, not
-zero: the tag plane need not be parallel to the vial.
+is shown for reference only. The target is pitch = yaw = 0 (camera square to
+the tag plane, config.ALIGN_TARGET_DEG).
 """
 
 import math
@@ -48,9 +48,9 @@ def average_samples(samples):
     return result
 
 
-def delta_from_baseline(current, baseline):
-    return {axis: (None if current.get(axis) is None or baseline.get(axis) is None
-                   else wrap_deg(current[axis] - baseline[axis])) for axis in AXES}
+def angle_delta(current, reference):
+    return {axis: (None if current.get(axis) is None or reference.get(axis) is None
+                   else wrap_deg(current[axis] - reference[axis])) for axis in AXES}
 
 
 def screw_model(teach, turn):
@@ -60,7 +60,7 @@ def screw_model(teach, turn):
     """
     columns = []
     for screw in SCREWS:
-        change = delta_from_baseline(teach[screw]["after"], teach[screw]["before"])
+        change = angle_delta(teach[screw]["after"], teach[screw]["before"])
         columns.append([change[axis] / turn for axis in ADJUSTABLE])
     matrix = np.array(columns).T  # rows: pitch, yaw; columns: A, B
     if abs(np.linalg.det(matrix)) < 1e-9:
@@ -69,30 +69,9 @@ def screw_model(teach, turn):
               else (teach[s]["after"]["tick_center_px"] - teach[s]["before"]["tick_center_px"]) / turn for s in SCREWS]
     return {"axes": list(ADJUSTABLE), "screws": list(SCREWS), "turn": turn,
             "matrix_deg_per_turn": matrix.tolist(),
-            "roll_deg_per_turn": [delta_from_baseline(teach[s]["after"], teach[s]["before"])["roll_deg"] / turn
+            "roll_deg_per_turn": [angle_delta(teach[s]["after"], teach[s]["before"])["roll_deg"] / turn
                                   for s in SCREWS],
             "tick_center_px_per_turn": shifts}
-
-
-def tick_center_guidance(offset_px, model, tolerance_px):
-    """Turns that bring the tick center back to the ROI center.
-
-    One target axis (x) and two screws: use the screw that moves the ticks the
-    most per turn; the other screw mainly tilts the perpendicular axis.
-    """
-    result = {"within_tolerance": offset_px is not None and abs(offset_px) <= tolerance_px,
-              "tolerance_px": tolerance_px, "screw": None}
-    shifts = (model or {}).get("tick_center_px_per_turn") or []
-    usable = [(abs(shift), index) for index, shift in enumerate(shifts) if shift is not None and abs(shift) > 1e-6]
-    if offset_px is None or not usable:
-        return result
-    index = max(usable)[1]
-    turns = -offset_px / shifts[index]
-    result["screw"] = {"screw": SCREWS[index], "turns": turns, "px_per_turn": shifts[index],
-                       "ok": result["within_tolerance"],
-                       "label": "✓" if result["within_tolerance"] else
-                       f"{'順時針' if turns > 0 else '逆時針'} {turns_label(turns)}"}
-    return result
 
 
 def turns_label(turns, step=Fraction(1, 8)):
@@ -106,7 +85,7 @@ def turns_label(turns, step=Fraction(1, 8)):
 
 
 def guidance(delta, model, tolerance_deg):
-    """Turns per screw that bring pitch/yaw back to the baseline."""
+    """Turns per screw that bring pitch/yaw back to the target (delta = current - target)."""
     within = all(delta.get(axis) is not None and abs(delta[axis]) <= tolerance_deg for axis in ADJUSTABLE)
     result = {"within_tolerance": within, "tolerance_deg": tolerance_deg, "screws": [],
               "roll_deg": delta.get("roll_deg"), "roll_note": "機構無法調整，僅供參考"}

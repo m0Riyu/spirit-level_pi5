@@ -207,11 +207,19 @@ BROWSER_SCENARIOS = r"""
       mean_slope_mm_per_m: .04, std_slope_mm_per_m: .001, range_slope_mm_per_m: .003, stable_duration_seconds: 2 } });
   assert(document.getElementById("stabilityState").textContent === "穩定" && document.getElementById("state").textContent === "ADJUST", "stability independent of system level state");
   assert(document.getElementById("calibrationBanner").hidden, "no calibration banner without pending geometry");
+  renderTelemetry({ type: "telemetry", frame_id: 45, sent_at_epoch_ms: Date.now(), system_state: "LEVEL", performance: {},
+    stability: {}, measurement: {}, tick_center: { offset_px: 12.34, within: false, tolerance_px: 10 },
+    camera_pose: { within: false, pitch_error_deg: .234, yaw_error_deg: -.01, tolerance_deg: .1 } });
+  assert(!document.getElementById("tickCenterBanner").hidden &&
+    document.getElementById("tickCenterBannerText").textContent.includes("Pitch +0.23 °") &&
+    document.getElementById("tickCenterBannerLink").getAttribute("href") === "#/align", "camera pose off zero: go to ②");
   renderTelemetry({ type: "telemetry", frame_id: 46, sent_at_epoch_ms: Date.now(), system_state: "LEVEL", performance: {},
-    stability: {}, measurement: {}, tick_center: { offset_px: 12.34, within: false, tolerance_px: 10 } });
+    stability: {}, measurement: {}, tick_center: { offset_px: 12.34, within: false, tolerance_px: 10 },
+    camera_pose: { within: true } });
   assert(!document.getElementById("tickCenterBanner").hidden &&
     document.getElementById("tickCenterBannerText").textContent.includes("+12.3 px") &&
-    document.getElementById("tickCenterBannerLink").getAttribute("href") === "#/align", "tick center out of range: go to ②");
+    document.getElementById("tickCenterBannerText").textContent.includes("擺放位置") &&
+    document.getElementById("tickCenterBannerLink").hidden, "pose fine but ticks off center: check the vial placement");
   renderTelemetry({ type: "telemetry", frame_id: 47, sent_at_epoch_ms: Date.now(), system_state: "LEVEL", performance: {},
     stability: {}, measurement: {}, tick_center: { offset_px: 3, within: true, camera_moved: true, geometry_drift_px: 1.8, tolerance_px: 10 } });
   assert(document.getElementById("tickCenterBannerLink").getAttribute("href") === "#/ticks", "ticks moved vs geometry: go to ③");
@@ -296,36 +304,33 @@ BROWSER_SCENARIOS = r"""
   const rollback = history.querySelector("button");
   rollback.click();
   assert(rollback.textContent.includes("再按一次"), "rollback needs a second press");
-  // ② alignment page.
-  const alignSample = { type: "align", pose_count: 4, tag_count: 4, window_full: true, baseline_version: "a1_alignment",
-    angles: { frames: 10, pitch_deg: 10.3, yaw_deg: 19.95, roll_deg: 179.5, pitch_deg_std: .004, yaw_deg_std: .006 },
-    delta: { pitch_deg: .3, yaw_deg: -.05, roll_deg: .12 }, model_ready: true, tolerance_deg: .1,
+  // ② alignment page: pitch/yaw to zero; tick center is placement info.
+  const alignSample = { type: "align", pose_count: 4, tag_count: 4, window_full: true, target: { pitch_deg: 0, yaw_deg: 0 },
+    angles: { frames: 10, pitch_deg: .3, yaw_deg: -.05, roll_deg: 179.5, pitch_deg_std: .004, yaw_deg_std: .006 },
+    delta: { pitch_deg: .3, yaw_deg: -.05, roll_deg: 179.5 }, model_ready: true, tolerance_deg: .1,
     hold_seconds_required: 3, in_range_seconds: 0, can_complete: false, entered_range: false, teaching: {}, collecting: [],
-    tick_center: { x_px: 382.3, offset_px: 12.3, within: false, target_px: 370, tolerance_px: 10, std_px: .04,
-      guidance: { screw: { screw: "A", label: "順時針 約 1 又 1/4 圈" } } },
+    tick_center: { x_px: 385.3, offset_px: 15.3, within: false, target_px: 370, tolerance_px: 10 },
     guidance: { within_tolerance: false, screws: [{ screw: "A", ok: false, label: "逆時針 約 1/4 圈" }, { screw: "B", ok: true, label: "✓" }] } };
   location.hash = "#/align";
   await eventually(() => !document.getElementById("viewAlign").hidden);
   renderAlign(alignSample);
-  assert(document.querySelector("#alignTickCenter strong").textContent === "+12.3 px" &&
-    document.getElementById("alignTickCenter").classList.contains("bad") &&
-    document.getElementById("alignTickScrew").textContent === "螺絲 A　順時針 約 1 又 1/4 圈", "tick center target and screw");
   assert(document.querySelector("#alignPitch strong").textContent === "+0.300 °" &&
     document.getElementById("alignPitch").classList.contains("bad") &&
-    document.getElementById("alignYaw").classList.contains("ok"), "large deltas colored against the tolerance");
+    document.getElementById("alignYaw").classList.contains("ok"), "pitch/yaw vs zero, colored against the tolerance");
   assert(document.getElementById("alignScrews").textContent.includes("螺絲 A　逆時針 約 1/4 圈") &&
     document.querySelector("#alignScrews .ok").textContent.includes("✓"), "screw guidance rows");
-  assert(document.getElementById("alignRoll").textContent.includes("機構無法調整") && document.getElementById("alignComplete").disabled,
+  assert(document.getElementById("alignRoll").textContent.includes("179.50 °") &&
+    document.getElementById("alignRoll").textContent.includes("機構無法調整") && document.getElementById("alignComplete").disabled,
     "roll for reference; complete waits for the hold time");
-  renderAlign({ ...alignSample, delta: { pitch_deg: .02, yaw_deg: -.05, roll_deg: .1 }, in_range_seconds: 3.2,
-    can_complete: true, entered_range: true, guidance: { within_tolerance: true, screws: [] },
-    tick_center: { ...alignSample.tick_center, offset_px: 2.1, within: true, guidance: { screw: { screw: "A", label: "✓" } } } });
-  assert(document.getElementById("alignTickCenter").classList.contains("ok"), "tick center in range is green");
+  assert(document.getElementById("alignTickInfo").textContent.includes("+15.3 px") &&
+    document.getElementById("alignTickInfo").textContent.includes("擺放位置"), "tick center shown as placement info");
+  assert(document.getElementById("alignSetBaseline") === null, "no baseline control");
+  renderAlign({ ...alignSample, delta: { pitch_deg: .02, yaw_deg: -.05, roll_deg: 179.5 }, in_range_seconds: 3.2,
+    can_complete: true, entered_range: true, guidance: { within_tolerance: true, screws: [] } });
   assert(!document.getElementById("alignComplete").disabled && document.getElementById("alignHold").textContent.includes("3.2 / 3"),
     "complete enabled after 3 s in range");
-  renderAlign({ ...alignSample, delta: null, baseline_version: null, guidance: null });
-  assert(document.querySelector("#alignPitch strong").textContent === "10.30 °" &&
-    document.getElementById("alignStatus").textContent.includes("尚未設定基準"), "absolute angles without a baseline");
+  renderAlign({ ...alignSample, model_ready: false, guidance: { within_tolerance: false, screws: [] } });
+  assert(document.getElementById("alignScrews").textContent.includes("螺絲教學"), "untaught model points to teaching");
   // ⚙ system page: PIN retry, two-press restart, long-press shutdown, LOG list.
   const pinCalls = [];
   window.fetch = async (url, options = {}) => {
@@ -389,7 +394,7 @@ class DashboardContractTests(unittest.TestCase):
             self.assertNotIn(value, measure_view)
         self.assertEqual(self.html.count("<img"), 2)  # ② and ③ previews, opened on request only
         for value in ('id="ticksPreview"', 'id="alignPreview"', 'id="alignPitch"', 'data-teach="A/start"',
-                      '"/api/align/complete"', '"/api/align/baseline"'):
+                      '"/api/align/complete"', 'id="alignTickInfo"'):
             self.assertIn(value, self.html)
         for value in ('id="captureOptionsCard"', 'id="referenceDeg"', 'id="aAxisDeg"', 'id="sweepDirection"',
                       'id="burstFrames"', 'id="captureNote"', 'id="calibrationBanner"'):

@@ -1,8 +1,12 @@
 """Mode ①: YOLO -> two-layer calibration -> stability -> telemetry / captures."""
 
+import collections
 import time
 
+import apriltag_config
 import config
+from alignment import average_angles
+from apriltag_measurement import create_detector, measure_frame, summarize
 from bubble_measurement import BubbleMeasurement
 from calibration_store import NOMINAL_VIAL
 from display import show_clean_frame as show_frame
@@ -51,7 +55,7 @@ def new_stability_tracker():
 
 class MeasureProcessor:
     def __init__(self, *, detector, captures, publish=None, logger=None,
-                 geometry=None, vial=None, calibration=None):
+                 geometry=None, vial=None, calibration=None, camera=None, tag_detector_factory=None):
         self.detector = detector
         self.captures = captures
         self.publish = publish
@@ -59,6 +63,13 @@ class MeasureProcessor:
         self.stability = new_stability_tracker()
         self.tick_center = center_status(None)
         self._next_tick_check = 0.0
+        # ② target monitor: AprilTag pitch/yaw once a second, averaged.
+        self.camera = camera
+        self.tag_detector_factory = tag_detector_factory or (lambda: create_detector(apriltag_config.TAG_FAMILY))
+        self._tag_detector = None
+        self._pose_samples = collections.deque(maxlen=config.POSE_MONITOR_WINDOW)
+        self._next_pose_check = 0.0
+        self.camera_pose = self._pose_status()
         self.set_calibration(geometry, vial, calibration)
 
     def set_calibration(self, geometry, vial, calibration):
@@ -82,6 +93,9 @@ class MeasureProcessor:
         # A window from before the switch would describe an older scene.
         self.stability = new_stability_tracker()
         self._next_tick_check = 0.0
+        self._pose_samples.clear()  # ② may just have moved the camera
+        self._next_pose_check = 0.0
+        self.camera_pose = self._pose_status()
         self.captures.set_ready(True)
 
     def leave(self):
@@ -111,6 +125,34 @@ class MeasureProcessor:
         prior = (geometry.zero_x_roi(), geometry.px_per_div(geometry.zero_x_roi())) if geometry else (None, None)
         self.tick_center = center_status(scale_center(detect_ticks(roi, *prior)), geometry)
         return self.tick_center
+
+    def _pose_status(self, tag_count=None):
+        angles = average_angles(list(self._pose_samples))
+        errors = {axis: (None if angles[axis] is None else angles[axis] - target)
+                  for axis, target in config.ALIGN_TARGET_DEG.items()}
+        within = None if not self._pose_samples else all(
+            value is not None and abs(value) <= config.ALIGN_TOLERANCE_DEG for value in errors.values())
+        return {"pitch_deg": angles["pitch_deg"], "yaw_deg": angles["yaw_deg"], "roll_deg": angles["roll_deg"],
+                "pitch_error_deg": errors["pitch_deg"], "yaw_error_deg": errors["yaw_deg"],
+                "within": within, "samples": len(self._pose_samples), "tag_count": tag_count,
+                "tolerance_deg": config.ALIGN_TOLERANCE_DEG}
+
+    def check_camera_pose(self, full):
+        """Once a second: AprilTag pitch/yaw vs the ② target (zero), 10-reading average."""
+        if self.camera is None or full is None:
+            return self.camera_pose
+        now = time.monotonic()
+        if now < self._next_pose_check:
+            return self.camera_pose
+        self._next_pose_check = now + config.POSE_MONITOR_INTERVAL_SECONDS
+        if self._tag_detector is None:
+            self._tag_detector = self.tag_detector_factory()
+        summary = summarize(measure_frame(full, self._tag_detector, self.camera.undistorter.camera_matrix,
+                                          apriltag_config.TAG_SIZE_METER))
+        if summary["pose_count"]:
+            self._pose_samples.append({axis: summary[axis] for axis in ("pitch_deg", "yaw_deg", "roll_deg")})
+        self.camera_pose = self._pose_status(summary["pose_count"])
+        return self.camera_pose
 
     def process(self, frame, context):
         frame_id, loop_start = frame.frame_id, context["loop_start"]
@@ -153,6 +195,7 @@ class MeasureProcessor:
         print_metrics(frame_id, prediction.detection, measurement, timings)
         payload["mode"] = "measure"
         payload["tick_center"] = self.check_tick_center(frame.roi, geometry)
+        payload["camera_pose"] = self.check_camera_pose(frame.full)
         payload["stability"] = stability.as_dict()
         payload["capture"] = {"ready": self.captures.ready, "require_stable_for_capture": self.captures.require_stable}
         payload["frame_started_at_epoch_ms"] = frame.started_epoch_ms

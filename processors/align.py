@@ -1,15 +1,15 @@
-"""Mode ②: re-aim the camera with the screws until the scale's tick center is
-back near the ROI center, then complete alignment (geometry -> pending, redo ③).
-
-The target is the tick center (median of left/right tick pair midpoints) within
-±TICK_CENTER_TOLERANCE_PX of the ROI center. AprilTag pitch/yaw/roll against an
-optional baseline are shown as a second reference.
+"""Mode ②: turn the screws until the camera faces the AprilTag plane square
+(pitch = yaw = 0 within ±ALIGN_TOLERANCE_DEG), then complete alignment
+(geometry -> pending, redo ③).
 
 Tags are measured on the undistorted FULL frame (not the ROI) with the same
 camera matrix as the service. Angles are a moving average of the last
-ALIGN_AVERAGE_FRAMES frames; their spread is shown as the reading noise.
-Teaching and new baselines average frames captured AFTER the button press, so
-a screw still turning cannot leak into the recorded angles.
+ALIGN_AVERAGE_FRAMES frames; their spread is shown as the reading noise. Roll
+cannot be adjusted by the mount and is reference only. The tick center is
+reported too: with yaw fixed at zero, where the ticks land is decided by how
+the vial sits, so it is a placement hint rather than a screw target.
+Teaching averages frames captured AFTER the button press, so a screw still
+turning cannot leak into the recorded angles.
 """
 
 import collections
@@ -22,7 +22,7 @@ import cv2
 
 import apriltag_config
 import config
-from alignment import SCREWS, average_samples, delta_from_baseline, guidance, screw_model, tick_center_guidance
+from alignment import SCREWS, average_samples, angle_delta, guidance, screw_model
 from apriltag_measurement import create_detector, measure_frame, summarize
 from calibration_store import TIMEZONE
 from tick_detection import center_status, detect_ticks, scale_center
@@ -125,17 +125,17 @@ class AlignProcessor:
             return
         model["created_at_iso"] = datetime.now(TIMEZONE).isoformat(timespec="seconds")
         model["teach"] = teach
-        baseline = (self.alignment or {}).get("baseline")
-        self._save_alignment(baseline, model)
+        self._save_alignment(model)
         with self._lock:
             self._teach.clear()
             self._message = "螺絲模型已建立並儲存"
 
-    def _save_alignment(self, baseline, model):
+    def _save_alignment(self, model):
         now = datetime.now(TIMEZONE)
         geometry = self.store.active_state("geometry")["version"]
         record = {"schema_version": 1, "version": self.store.new_version("alignment", now),
-                  "created_at_iso": now.isoformat(timespec="seconds"), "baseline": baseline, "screw_model": model,
+                  "created_at_iso": now.isoformat(timespec="seconds"), "target": dict(config.ALIGN_TARGET_DEG),
+                  "screw_model": model,
                   "geometry_version": geometry, "tag_family": apriltag_config.TAG_FAMILY,
                   "tag_size_m": apriltag_config.TAG_SIZE_METER}
         self.store.save("alignment", record)
@@ -144,34 +144,20 @@ class AlignProcessor:
             self.runtime.reload()  # alignment version is logged with every capture
         return record
 
-    def set_baseline(self, confirm=False):
-        if not confirm:
-            return 409, {"status": "error", "error_code": "CONFIRMATION_REQUIRED",
-                         "message": "設為新基準只應在完整校正並驗證後使用，請再次確認"}
-
-        def done(angles):
-            record = self._save_alignment(angles, (self.alignment or {}).get("screw_model"))
-            with self._lock:
-                self._message = f"新基準已儲存：{record['version']}"
-                self._in_range_since, self._was_within = None, False
-
-        self._collect("baseline", done)
-        return 202, {"status": "collecting", "frames": config.ALIGN_AVERAGE_FRAMES}
-
     def complete(self):
         with self._lock:
             status = dict(self._last)
             start = self._start_angles
         if not status.get("can_complete"):
             return 409, {"status": "error", "error_code": "NOT_IN_RANGE",
-                         "message": f"刻度中心需在畫面中心 ±{config.TICK_CENTER_TOLERANCE_PX:g} px 內持續 "
+                         "message": f"Pitch、Yaw 需都在 0 ±{config.ALIGN_TOLERANCE_DEG:g}° 內持續 "
                                     f"{config.ALIGN_HOLD_SECONDS:g} 秒"}
         now = datetime.now(TIMEZONE)
         geometry = self.store.active_state("geometry")
         log = {"schema_version": 1, "completed_at_iso": now.isoformat(timespec="milliseconds"),
-               "alignment_version": (self.alignment or {}).get("version"), "baseline": (self.alignment or {}).get("baseline"),
+               "alignment_version": (self.alignment or {}).get("version"), "target": dict(config.ALIGN_TARGET_DEG),
                "before": start, "after": status["angles"], "delta_after": status["delta"],
-               "tick_center_after": status["tick_center"], "tick_center_tolerance_px": config.TICK_CENTER_TOLERANCE_PX,
+               "tick_center_after": status["tick_center"],
                "geometry_version": geometry["version"], "tolerance_deg": config.ALIGN_TOLERANCE_DEG}
         self.log_directory.mkdir(parents=True, exist_ok=True)
         path = self.log_directory / f"{now.strftime('%Y%m%dT%H%M%S')}_alignment_log.json"
@@ -215,15 +201,14 @@ class AlignProcessor:
             job.done(average_samples(job.samples))
 
         alignment = self.alignment or {}
-        baseline = alignment.get("baseline")
-        delta = delta_from_baseline(angles, baseline) if baseline else None
-        guide = guidance(delta, alignment.get("screw_model"), config.ALIGN_TOLERANCE_DEG) if delta and full else None
+        target = config.ALIGN_TARGET_DEG
+        delta = angle_delta(angles, {**target, "roll_deg": angles.get("roll_deg")})
+        delta["roll_deg"] = angles.get("roll_deg")  # absolute; not adjustable, reference only
+        guide = guidance(delta, alignment.get("screw_model"), config.ALIGN_TOLERANCE_DEG) if full else None
         tick_center = center_status(angles["tick_center_px"], geometry)
         tick_center["std_px"] = angles["tick_center_px_std"]
-        tick_center["guidance"] = tick_center_guidance(tick_center["offset_px"], alignment.get("screw_model"),
-                                                       config.TICK_CENTER_TOLERANCE_PX)
         now = time.monotonic()
-        within = bool(full and tick_center["within"])
+        within = bool(guide and guide["within_tolerance"])
         with self._lock:
             entered = within and not self._was_within
             self._was_within = within
@@ -236,8 +221,7 @@ class AlignProcessor:
                 "tag_count": summary["tag_count"], "pose_count": summary["pose_count"],
                 "tag_ids": [result["tag_id"] for result in measurements],
                 "angles": angles, "window_full": full, "delta": delta, "guidance": guide,
-                "tick_center": tick_center,
-                "baseline_version": alignment.get("version") if baseline else None,
+                "tick_center": tick_center, "target": dict(target),
                 "model_ready": alignment.get("screw_model") is not None,
                 "tolerance_deg": config.ALIGN_TOLERANCE_DEG, "hold_seconds_required": config.ALIGN_HOLD_SECONDS,
                 "in_range_seconds": held, "entered_range": entered,
