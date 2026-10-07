@@ -5,7 +5,7 @@
 | # | 功能 | 用途 |
 |---|---|---|
 | ① | 量測 | YOLO 氣泡 → 兩層校正 → 斜率／角度；手機觸發連拍記錄（可輸入參考值） |
-| ② | 相機對位 | AprilTag 量相機角度，引導轉彈簧螺絲回到基準姿態 |
+| ② | 相機對位 | AprilTag 量相機角度，引導轉彈簧螺絲讓 Pitch、Yaw 歸零 |
 | ③ | 刻度檢查 | 多幀量測刻度，更新「像素 → 格數」幾何校正 |
 | ⚙ | 系統 | 狀態、重啟服務／重新開機／關機（PIN）、LOG 下載 |
 
@@ -148,7 +148,7 @@ echo 'LEVELSVC_PIN=<自訂數字>' | sudo tee /etc/levelsvc/env >/dev/null && su
 my_project_V2/calibration/
 ├── geometry/   <時間>_geometry.json（+ _roi.png）、active.json
 ├── vial/       <時間>_vial.json、active.json
-└── alignment/  <時間>_alignment.json（基準角度＋螺絲模型）、active.json
+└── alignment/  <時間>_alignment.json（目標角度＋螺絲模型）、active.json
 ```
 
 - 每次更新都產生新檔、舊檔不改；`active.json` 記錄使用中的版本與 `pending_confirmation`（待確認）。退回只是改指向。
