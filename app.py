@@ -15,6 +15,8 @@ from detector import YoloDetector
 from display import close_windows
 from manual_capture import CaptureManager
 from mode_manager import ModeManager
+from power_guard import PowerGuard
+from power_monitor import PowerMonitor
 from preview import PreviewBuffer
 from processors.align import AlignProcessor
 from processors.measure import MeasureProcessor
@@ -128,6 +130,7 @@ def run():
 
     controller = SystemController(captures)
     pin = PinGuard()
+    power = PowerGuard(PowerMonitor(), controller, publish=publish) if config.POWER_MONITOR_ENABLED else None
 
     def service_state():
         return {"type": "state", "schema_version": 1, **manager.state(),
@@ -135,6 +138,7 @@ def run():
                 "camera": {"open": camera.camera is not None, "open_count": camera.open_count,
                            "frame_id": camera.frame_id,
                            "focus_absolute": getattr(camera.camera, "focus_absolute", None)},
+                "power": power.status() if power is not None else None,
                 "system": {**system_summary(), "storage": captures.storage_estimate(),
                            "pin_configured": bool(pin.pin), "dry_run": config.SYSTEM_DRY_RUN}}
 
@@ -160,6 +164,11 @@ def run():
         except (OSError, RuntimeError) as error:
             telemetry = None
             print(f"警告：WebSocket遙測無法啟動，主程式繼續執行：{error}")
+
+    if power is not None:
+        power.start()  # battery protection runs independently of the camera loop
+        print(f"電池監測已啟動（暫定門檻：警告 {config.POWER_WARN_VOLTAGE_V} V、"
+              f"安全關機 {config.POWER_SHUTDOWN_VOLTAGE_V} V，倒數 {config.POWER_SHUTDOWN_COUNTDOWN_SECONDS:g} 秒）")
 
     if logger is not None:
         print(f"CSV預定儲存位置：{logger.path.resolve()}")
@@ -195,6 +204,7 @@ def run():
         # writer or lose already frozen captures.
         for label, callback in (
             ("模式", manager.close),
+            ("電池監測", power.stop if power is not None else None),
             ("CSV", logger.close if logger is not None else None),
             ("相機", camera.close),
             ("系統控制", controller.camera_has_closed),

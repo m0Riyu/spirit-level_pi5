@@ -195,7 +195,7 @@ class ServiceShutdownIntegrationTests(unittest.TestCase):
                                 ("ENABLE_IMAGE_STREAM", False), ("ENABLE_CONTINUOUS_CSV", False),
                                 ("WEBSOCKET_HOST", "127.0.0.1"), ("DASHBOARD_HOST", "127.0.0.1"),
                                 ("WEBSOCKET_PORT", unused_port()), ("DASHBOARD_PORT", http_port),
-                                ("SYSTEM_COMMAND_DELAY_SECONDS", 0)):
+                                ("SYSTEM_COMMAND_DELAY_SECONDS", 0), ("POWER_MONITOR_ENABLED", False)):
                 stack.enter_context(patch.object(config, name, value))
             stack.enter_context(patch.dict(os.environ, {"LEVELSVC_PIN": "2468"}))
             stack.enter_context(patch.object(app, "YoloDetector", return_value=detector))
@@ -236,6 +236,43 @@ class ServiceShutdownIntegrationTests(unittest.TestCase):
         camera.stop.assert_called_once_with()
         camera.close.assert_called_once_with()
         self.assertEqual(commands, [["/usr/bin/systemctl", "poweroff"]])
+
+
+class BatteryShutdownIntegrationTests(unittest.TestCase):
+    """app.run() with a fake camera: a low battery counts down, then powers off by itself."""
+
+    def test_low_battery_counts_down_closes_camera_and_powers_off(self):
+        frame = np.zeros((540, 960, 3), np.uint8)
+        camera = Mock(frame_undistorter=Mock(process=lambda image: image), focus_absolute=3711)
+        camera.capture_array.side_effect = lambda stream: (time.sleep(.01), frame)[1]
+        detector = Mock()
+        detector.predict.return_value = Prediction(None, Detection(), 1., 0., 1., 0.)
+        battery = Mock()
+        battery.snapshot.return_value = {"battery_v": 3.0, "discharge_a": 1.7, "output_5v_v": 5.2, "output_5v_a": .7,
+                                         "charging": False, "throttled_hex": "0x0", "status": "ok"}
+        battery.details.return_value = {"alarm_level": "shutdown", "error": ""}
+        commands, published = [], []
+        with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack:
+            for name, value in (("LOG_DIRECTORY", Path(directory)), ("CALIBRATION_DIRECTORY", Path(directory) / "cal"),
+                                ("ENABLE_IMAGE_STREAM", False), ("ENABLE_CONTINUOUS_CSV", False), ("ENABLE_WEBSOCKET", False),
+                                ("SYSTEM_COMMAND_DELAY_SECONDS", 0), ("POWER_MONITOR_ENABLED", True),
+                                ("POWER_SHUTDOWN_COUNTDOWN_SECONDS", 1.5)):
+                stack.enter_context(patch.object(config, name, value))
+            stack.enter_context(patch.object(app, "PowerMonitor", return_value=battery))
+            stack.enter_context(patch.object(app, "YoloDetector", return_value=detector))
+            stack.enter_context(patch.object(app, "create_camera", return_value=camera))
+            stack.enter_context(patch.object(system_controller, "run_system_command", side_effect=commands.append))
+            stack.enter_context(patch.object(app, "close_windows"))
+            output = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            service = threading.Thread(target=app.run)
+            started = time.monotonic()
+            service.start()
+            service.join(15)
+        self.assertFalse(service.is_alive())
+        self.assertGreater(time.monotonic() - started, 1.5)  # the countdown was honoured
+        camera.close.assert_called_once_with()
+        self.assertEqual(commands, [["/usr/bin/systemctl", "poweroff"]])
+        self.assertIn("電池電壓過低", output.getvalue())
 
 
 class DeployTests(unittest.TestCase):

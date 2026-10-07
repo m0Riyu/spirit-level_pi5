@@ -106,6 +106,45 @@ SYSTEM_DRAIN_TIMEOUT_SECONDS = 10     # wait for captures to finish writing
 SYSTEM_COMMAND_DELAY_SECONDS = 1.0    # let the HTTP response reach the phone first
 SYSTEM_DRY_RUN = os.environ.get("LEVELSVC_SYSTEM_DRY_RUN") == "1"
 
+# ⚡ Battery module power monitor (Mcuzone 3003 21700 5V5A PD RP5, INA219 × 3).
+# Developed standalone in /home/user/power_test; moved here unchanged.
+# 實測（2026-10-08，USB 測試儀與 Pi 5 PMIC 交叉比對）：0x41、0x44 的電流讀值都偏低
+# （約 2.5–2.9 倍與約 1.7 倍），電流只作趨勢參考；安全關機只依電池電壓，不受影響。
+POWER_I2C_BUS = 1                      # GPIO2 SDA / GPIO3 SCL
+POWER_SAMPLE_INTERVAL_SECONDS = 1.0
+
+# 依廠商腳本 INA219_10MR1126.py：0x40 充電、0x44 電池放電、0x41 5V 輸出（i2cdetect 已確認存在）。
+POWER_CHANNEL_ADDRESSES = {"charge": 0x40, "discharge": 0x44, "output_5v": 0x41}
+# 分流電阻：由廠商校正值反推 0.04096 / (26868 × 0.1524 mA) = 0.0100 Ω（檔名 10MR）。
+# 腳本註解另有 5 mΩ 的數值，待電表對照確認。
+POWER_SHUNT_OHMS = {"charge": 0.010, "discharge": 0.010, "output_5v": 0.010}
+# 電池電壓取放電通道的 bus 電壓（分流電阻負載側 = 負載下電池電壓）。
+POWER_BATTERY_VOLTAGE_CHANNEL = "discharge"
+# 晶片維持出廠預設（config 0x399F：±320 mV）；本模組只讀不寫，不使用 calibration/current 暫存器。
+POWER_SHUNT_PGA_MV = 320
+
+# 暫定：充電電流大於此值視為充電中（無實測依據）。
+POWER_CHARGING_CURRENT_A = 0.05
+
+# 暫定門檻（負載下電池電壓，無實測依據，不可當作已驗證的數字）。
+POWER_WARN_VOLTAGE_V = 3.3
+POWER_SHUTDOWN_VOLTAGE_V = 3.1
+POWER_HYSTERESIS_V = 0.05              # 暫定
+POWER_DEBOUNCE_SECONDS = 10.0          # 暫定：連續低於門檻達此秒數才觸發
+POWER_THRESHOLDS_PROVISIONAL = True
+
+# 剩餘電量估計：曲線為 ((電壓 V, 百分比), ...)，實測前為 None → 結果標示「未校準」。
+POWER_CAPACITY_MAH = 10000             # 2 × 21700 並聯，標稱值
+POWER_DISCHARGE_CURVE = None
+POWER_DISCHARGE_CURVE_CALIBRATED = False
+POWER_SOC_MAX_GAP_SECONDS = 30.0       # 讀值中斷超過此秒數就不積分
+
+POWER_THROTTLED_COMMAND = ("vcgencmd", "get_throttled")
+POWER_THROTTLED_TIMEOUT_SECONDS = 2.0
+POWER_MONITOR_ENABLED = True
+POWER_SHUTDOWN_COUNTDOWN_SECONDS = 30.0  # 暫定：觸發關機門檻後，通知倒數這麼久才安全關機
+POWER_PUBLISH_INTERVAL_SECONDS = 2.0     # 網頁電源狀態更新頻率
+
 # Web dashboard and WebSocket telemetry. Open http://<Pi IP>:8100 on a phone
 # connected to the same network. The WebSocket endpoint is ws://<Pi IP>:8865.
 ENABLE_WEBSOCKET = True

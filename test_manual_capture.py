@@ -607,7 +607,8 @@ class ManualMainLoopTests(unittest.TestCase):
             server.dashboard_urls.return_value = []
             with contextlib.ExitStack() as stack:
                 for name, value in (("ENABLE_CONTINUOUS_CSV", False), ("ENABLE_IMAGE_STREAM", False),
-                                    ("ENABLE_WEBSOCKET", True), ("TELEMETRY_SEND_EVERY", 2)):
+                                    ("ENABLE_WEBSOCKET", True), ("TELEMETRY_SEND_EVERY", 2),
+                                    ("POWER_MONITOR_ENABLED", False)):
                     stack.enter_context(patch.object(config, name, value))
                 stack.enter_context(patch.object(app, "CaptureManager", return_value=manager))
                 stack.enter_context(patch.object(app, "YoloDetector", return_value=detector))

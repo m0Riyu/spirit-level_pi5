@@ -63,6 +63,7 @@ class MainUndistortionTests(unittest.TestCase):
             with (
                 patch.object(config, "CALIBRATION_DIRECTORY", store.root),
                 patch.object(config, "LOG_DIRECTORY", directory),
+                patch.object(config, "POWER_MONITOR_ENABLED", False),
                 patch.object(config, "ENABLE_BUBBLE_MEASUREMENT", True),
                 patch.object(config, "ENABLE_WEBSOCKET", True),
                 patch.object(config, "ENABLE_IMAGE_STREAM", True),
@@ -112,6 +113,7 @@ class CalibrationMismatchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, (
                 patch.object(config, "CALIBRATION_DIRECTORY", Path(directory) / "none")), (
                 patch.object(config, "LOG_DIRECTORY", Path(directory))), (
+                patch.object(config, "POWER_MONITOR_ENABLED", False)), (
                 contextlib.redirect_stdout(io.StringIO())) as output:
             store = CalibrationStore()
             with self.assertRaises(FileNotFoundError):

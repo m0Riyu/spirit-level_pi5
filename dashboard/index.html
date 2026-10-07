@@ -416,6 +416,11 @@
     .history { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; font-size: 14px; }
     .history li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; overflow-wrap: anywhere; }
     .history .active { color: var(--mint); font-weight: 800; }
+    .power-banner.warning { border-color: var(--yellow); background: rgba(255, 215, 94, 0.18); color: #ffe9a3; }
+    .power-banner.critical {
+      border-color: var(--red); background: rgba(255, 102, 95, 0.22); color: #ffd6d4;
+      font-size: 20px; line-height: 1.45;
+    }
     .mode-banner { border-color: var(--orange); background: rgba(255, 154, 95, 0.14); color: #ffd3b8; }
     .mode-banner button {
       margin-left: 8px; padding: 4px 10px; border: 1px solid var(--orange); border-radius: 8px;
@@ -465,7 +470,9 @@
       <span>模式 <strong id="statusMode">—</strong></span>
       <span>校正 <strong id="statusCalibration">—</strong></span>
       <span>CPU <strong id="statusTemperature">—</strong></span>
+      <span>電池 <strong id="statusBattery">—</strong></span>
     </div>
+    <div id="powerBanner" class="calibration-banner power-banner" role="alert" hidden></div>
     <div id="modeBanner" class="calibration-banner mode-banner" role="alert" hidden>
       <span id="modeBannerText">模式已被切換</span><button id="reclaimMode" type="button">切回此模式</button>
     </div>
@@ -944,6 +951,7 @@
         try { data = JSON.parse(event.data); } catch { return; }
         if (data.type === "telemetry") renderTelemetry(data);
         else if (data.type === "state") applyState(data);
+        else if (data.type === "power") applyPower(data);
         else if (data.type === "align" || data.type === "ticks") renderModeHeartbeat(data);
       });
 
@@ -1052,7 +1060,30 @@
       $("statusCalibration").className = calibration ? calibration[1] : "";
       const temperature = serviceState.system?.cpu_temperature_c;
       $("statusTemperature").textContent = number(temperature, 1, "°C");
+      if (state.power !== undefined) applyPower(state.power);
       renderModeBanner();
+      renderSystemStatus();
+    }
+
+    // ---- ⚡ battery protection ------------------------------------------------
+    let powerState = null;
+    function applyPower(power) {
+      powerState = power;
+      const battery = $("statusBattery"), banner = $("powerBanner");
+      if (!power) { battery.textContent = "未啟用"; banner.hidden = true; return; }
+      battery.textContent = power.state === "unavailable" ? "監測無法使用" : number(power.battery_v, 2, "V");
+      battery.className = { warning: "pending", countdown: "unavailable", shutting_down: "unavailable",
+        unavailable: "pending" }[power.state] || "";
+      const text = {
+        warning: `電池電量低（${number(power.battery_v, 2, "V")}）：請盡快充電或結束工作。` +
+          `低於 ${power.shutdown_v} V 時系統會自動安全關機。`,
+        countdown: `電池即將耗盡（${number(power.battery_v, 2, "V")}）：系統將於 ` +
+          `${Math.ceil(power.countdown_remaining_seconds ?? 0)} 秒後自動安全關機。接上充電器可取消。`,
+        shutting_down: "電池即將耗盡：系統正在安全關機（寫入資料、關閉相機），請勿拔電。",
+      }[power.state];
+      banner.hidden = !text;
+      banner.textContent = text || "";
+      banner.className = "calibration-banner power-banner " + (power.state === "warning" ? "warning" : "critical");
       renderSystemStatus();
     }
 
@@ -1084,6 +1115,13 @@
         ["服務執行時間", number(hours, 2, "小時")],
         ["剩餘可拍", system.storage?.estimated_remaining_captures == null ? "—" :
           `約 ${system.storage.estimated_remaining_captures} 次（每次約 ${(system.storage.bytes_per_capture / 1024 ** 2).toFixed(1)} MB）`],
+        ["電池", !powerState ? "監測未啟用" : powerState.state === "unavailable" ? `監測無法使用：${powerState.error}` :
+          `${number(powerState.battery_v, 3, "V")} · ${{ normal: "正常", warning: "電量低", countdown: "關機倒數中",
+            shutting_down: "安全關機中" }[powerState.state] || powerState.state}` +
+          ` · 門檻 ${powerState.warn_v} / ${powerState.shutdown_v} V（暫定）`],
+        ["5V 輸出", !powerState ? "—" : `${number(powerState.output_5v_v, 2, "V")} · 充電中：` +
+          `${powerState.charging === true ? "是" : powerState.charging === false ? "否" : "—"} · throttled ${powerState.throttled_hex ?? "—"}` +
+          "（電流讀值未校準，僅供趨勢參考）"],
         ["PIN", system.pin_configured ? "已設定" : "未設定（電源與退回功能停用）"],
         ["程式版本", `${system.git_branch || "—"} @ ${system.git_commit || "—"}${system.dry_run ? " · 指令模擬模式" : ""}`],
       ];

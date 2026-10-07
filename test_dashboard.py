@@ -266,6 +266,25 @@ BROWSER_SCENARIOS = r"""
   await eventually(() => !document.getElementById("viewSystem").hidden);
   assert(document.getElementById("viewMeasure").hidden && document.getElementById("modeBanner").hidden,
     "system page does not claim a camera mode");
+  // ⚡ battery banner and status bar.
+  const power = { state: "normal", battery_v: 3.612, warn_v: 3.3, shutdown_v: 3.1, output_5v_v: 5.2, charging: false,
+    throttled_hex: "0x0", error: "", countdown_remaining_seconds: null };
+  applyPower(power);
+  assert(document.getElementById("statusBattery").textContent === "3.61 V" && document.getElementById("powerBanner").hidden,
+    "battery voltage in the status bar, no banner when normal");
+  applyPower({ ...power, state: "warning", battery_v: 3.28 });
+  assert(!document.getElementById("powerBanner").hidden && document.getElementById("powerBanner").classList.contains("warning") &&
+    document.getElementById("powerBanner").textContent.includes("電池電量低"), "low battery warning banner");
+  applyPower({ ...power, state: "countdown", battery_v: 3.08, countdown_remaining_seconds: 17.2 });
+  assert(document.getElementById("powerBanner").classList.contains("critical") &&
+    document.getElementById("powerBanner").textContent.includes("18 秒後自動安全關機"), "shutdown countdown banner");
+  applyPower({ ...power, state: "shutting_down" });
+  assert(document.getElementById("powerBanner").textContent.includes("正在安全關機"), "shutting down notice");
+  applyPower({ ...power, state: "unavailable", battery_v: null, error: "I2C 無法開啟" });
+  assert(document.getElementById("powerBanner").hidden && document.getElementById("statusBattery").textContent === "監測無法使用",
+    "unavailable monitor is shown, never a shutdown banner");
+  applyPower(power);
+
   // ③ tick check page with a faked server.
   const realFetch = window.fetch;
   const applyBodies = [];
@@ -394,7 +413,7 @@ class DashboardContractTests(unittest.TestCase):
             self.assertNotIn(value, measure_view)
         self.assertEqual(self.html.count("<img"), 2)  # ② and ③ previews, opened on request only
         for value in ('id="ticksPreview"', 'id="alignPreview"', 'id="alignPitch"', 'data-teach="A/start"',
-                      '"/api/align/complete"', 'id="alignTickInfo"'):
+                      '"/api/align/complete"', 'id="alignTickInfo"', 'id="powerBanner"', 'id="statusBattery"'):
             self.assertIn(value, self.html)
         for value in ('id="captureOptionsCard"', 'id="referenceDeg"', 'id="aAxisDeg"', 'id="sweepDirection"',
                       'id="burstFrames"', 'id="captureNote"', 'id="calibrationBanner"'):
