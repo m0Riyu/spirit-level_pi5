@@ -177,6 +177,12 @@ my_project_V2/calibration/
   .venv/bin/python migrate_calibration.py geometry-images IMG... --stamp 20261002T145946 --focus 3711   # 由已存 ROI 影像擬合
   .venv/bin/python migrate_calibration.py vial --summary ../calibration_test/output/summary.json --fit yolo_ends_session_geometry
   ```
+- `fit_vial.py`：直接用 ① 參考值連拍的 LOG 擬合新的 vial（每次連拍的中位數 offset_div 對 DL-S4W 讀值，最小平方法）。
+  所有點必須是目前使用中的 geometry 量的；預設存成未啟用的新版本，附擬合殘差、原 vial 的誤差與逐回（session）交叉驗證。
+
+  ```bash
+  .venv/bin/python fit_vial.py ../logs/manual_captures/<session> [<session> ...] [--exclude <burst_id> ...] [--activate]
+  ```
 
 ## 現場量測流程（CNC ＋ DL-S4W）
 
@@ -198,7 +204,7 @@ my_project_V2/calibration/
    ```
 
    看 `output/summary.json` 的交叉驗證誤差；正向用來校正、反向用來驗證；有缺漏或離群點當場補拍。
-   要更新水平儀校正時再用 `migrate_calibration.py vial --summary ... --fit yolo_ends_session_geometry --activate`。
+   要更新水平儀校正時用 `fit_vial.py <session> ...`（或 `migrate_calibration.py vial --summary ... --fit yolo_ends_session_geometry`），確認後再套用。
 
 事後可以修正：倍率、零點、非線性、偵測演算法、剔除未穩定的幀。
 事後無法補救：缺少參考值、對焦或曝光不良、拍攝中途相機被碰動、點數不足、沒有保留驗證資料。
